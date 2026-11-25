@@ -32,6 +32,10 @@ import {
 import { storageService } from '../services/storageService.ts';
 import { crossDeviceSyncService } from '../services/crossDeviceSyncService.ts';
 import {
+  encodeCustomerNotesWithMeta,
+  encodeSaleNotesWithReturnMetadata,
+} from '../utils/syncMetadataCodec.ts';
+import {
   generatePairingUrl,
   generatePairingCode,
   applyPairingToken,
@@ -267,7 +271,7 @@ export const SupabaseSyncTab: React.FC<SupabaseSyncTabProps> = ({
           credit_balance: c.creditBalance,
           credit_limit: c.creditLimit,
           total_purchased: c.totalPurchased,
-          notes: c.notes,
+          notes: encodeCustomerNotesWithMeta(c),
         }));
         const { error: custErr } = await client.from('customers').upsert(mappedCustomers);
         if (custErr) throw new Error(`Customers sync failed: ${custErr.message}`);
@@ -298,7 +302,7 @@ export const SupabaseSyncTab: React.FC<SupabaseSyncTabProps> = ({
           is_credit_paid: s.isCreditPaid,
           credit_due_date: s.creditDueDate,
           paid_amount: s.paidAmount,
-          notes: s.notes,
+          notes: encodeSaleNotesWithReturnMetadata(s),
           items: s.items,
         }));
         const { error: salesErr } = await client.from('sales').upsert(mappedSales);

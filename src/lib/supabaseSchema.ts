@@ -58,6 +58,11 @@ CREATE TABLE IF NOT EXISTS public.sales (
     is_credit_paid BOOLEAN NOT NULL DEFAULT TRUE,
     credit_due_date DATE,
     paid_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+    is_returned BOOLEAN NOT NULL DEFAULT FALSE,
+    returned_at TIMESTAMP WITH TIME ZONE,
+    return_reason TEXT,
+    refund_method TEXT,
+    returned_by TEXT,
     notes TEXT,
     items JSONB NOT NULL DEFAULT '[]'::jsonb
 );

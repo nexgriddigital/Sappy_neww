@@ -5,6 +5,12 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import pg from 'pg';
+import {
+  decodeCustomerFromRemoteRow,
+  decodeSaleFromRemoteRow,
+  encodeCustomerNotesWithMeta,
+  encodeSaleNotesWithReturnMetadata,
+} from './src/utils/syncMetadataCodec.ts';
 
 dotenv.config();
 
@@ -623,51 +629,13 @@ async function reconcileSupabaseResetTombstone(
           if (Array.isArray(custs)) {
             serverState.customers = custs
               .filter((c) => c.id && !String(c.id).startsWith('__system_'))
-              .map((c) => ({
-                id: c.id,
-                name: c.name,
-                companyName: c.company_name || undefined,
-                phone: c.phone,
-                email: c.email || undefined,
-                address: c.address || undefined,
-                taxNumber: c.tax_number || undefined,
-                creditBalance: Number(c.credit_balance || 0),
-                creditLimit: Number(c.credit_limit || 500),
-                totalPurchased: Number(c.total_purchased || 0),
-                notes: c.notes || undefined,
-                createdAt: c.created_at || new Date().toISOString(),
-                updatedAt: c.updated_at || undefined,
-              }));
+              .map((c) => decodeCustomerFromRemoteRow(c));
           }
         }
         if (saleRes.status === 'fulfilled' && saleRes.value.ok) {
           const sales = (await saleRes.value.json()) as any[];
           if (Array.isArray(sales)) {
-            serverState.sales = sales.map((s) => ({
-              id: s.id,
-              invoiceNumber: s.invoice_number,
-              timestamp: s.timestamp || new Date().toISOString(),
-              customerId: s.customer_id || undefined,
-              customerName: s.customer_name,
-              customerPhone: s.customer_phone || undefined,
-              customerEmail: s.customer_email || undefined,
-              customerAddress: s.customer_address || undefined,
-              subtotal: Number(s.subtotal || 0),
-              taxRate: Number(s.tax_rate || 0),
-              taxAmount: Number(s.tax_amount || 0),
-              discountAmount: Number(s.discount_amount || 0),
-              totalAmount: Number(s.total_amount || 0),
-              totalCost: Number(s.total_cost || 0),
-              grossProfit: Number(s.gross_profit || 0),
-              paymentMethod: s.payment_method,
-              amountTendered: Number(s.amount_tendered || 0),
-              changeGiven: Number(s.change_given || 0),
-              isCreditPaid: s.is_credit_paid ?? true,
-              creditDueDate: s.credit_due_date || undefined,
-              paidAmount: Number(s.paid_amount || 0),
-              notes: s.notes || undefined,
-              items: Array.isArray(s.items) ? s.items : [],
-            }));
+            serverState.sales = sales.map((s) => decodeSaleFromRemoteRow(s));
           }
         }
         if (payRes.status === 'fulfilled' && payRes.value.ok) {
@@ -902,7 +870,11 @@ app.post('/api/pos/sync', async (req: Request, res: Response) => {
         if (existing && existing.isReturned && !s.isReturned) {
           continue;
         }
-        salesMap.set(s.id, s);
+        if (s.isReturned && existing) {
+          salesMap.set(s.id, { ...existing, ...s, isReturned: true, status: 'returned' });
+        } else {
+          salesMap.set(s.id, s);
+        }
       }
       serverState.sales = Array.from(salesMap.values()).sort(
         (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
@@ -1551,7 +1523,7 @@ app.post('/api/sync', async (req: Request, res: Response) => {
               c.creditBalance || 0,
               c.creditLimit || 500,
               c.totalPurchased || 0,
-              c.notes || null,
+              encodeCustomerNotesWithMeta(c),
             ]
           );
         }
@@ -1589,7 +1561,7 @@ app.post('/api/sync', async (req: Request, res: Response) => {
               s.isCreditPaid,
               s.creditDueDate || null,
               s.paidAmount || 0,
-              s.notes || null,
+              encodeSaleNotesWithReturnMetadata(s),
             ]
           );
 

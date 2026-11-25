@@ -1,6 +1,12 @@
 import { storageService } from './storageService.ts';
 import { getSupabase, getSupabaseCredentials, isSupabaseConfigured } from '../lib/supabase.ts';
 import { Sale, CreditPayment, Expense } from '../types/pos.ts';
+import {
+  decodeCustomerFromRemoteRow,
+  decodeSaleFromRemoteRow,
+  encodeCustomerNotesWithMeta,
+  encodeSaleNotesWithReturnMetadata,
+} from '../utils/syncMetadataCodec.ts';
 
 export type SyncStatusType = 'synced' | 'syncing' | 'offline' | 'error';
 export type SyncModeType = 'server' | 'supabase' | 'local';
@@ -42,6 +48,9 @@ class CrossDeviceSyncService {
   private queuedIsNewSetup = false;
   private actionDebounceTimer: any = null;
   private broadcastChannel: any = null;
+  private readonly instanceId = Math.random().toString(36).slice(2, 10);
+  private hasPendingLocalMutation = false;
+  private lastSupabaseSyncCompletedAt = 0;
 
   constructor() {
     this.autoSyncMode = this.loadAutoSyncMode();
@@ -56,8 +65,11 @@ class CrossDeviceSyncService {
 
     // 1. Subscribe to any storage mutations (actions completed anywhere in the app)
     storageService.subscribeToChanges(() => {
-      if (!this.isResetting && this.autoSyncMode === 'live') {
-        this.triggerActionSync();
+      if (!this.isResetting) {
+        this.hasPendingLocalMutation = true;
+        if (this.autoSyncMode === 'live') {
+          this.triggerActionSync();
+        }
       }
     });
 
@@ -499,6 +511,26 @@ class CrossDeviceSyncService {
           const p = msg?.payload || {};
           handleIncomingRemoteReset(p.resetEpoch, p.resetAt, p.status || 'awaiting_setup');
         })
+        .on('broadcast', { event: 'pos_sync_ping' }, (msg: any) => {
+          const p = msg?.payload || {};
+          if (p.clientId === this.instanceId) return;
+          if (this.isResetting || this.autoSyncMode !== 'live') return;
+          if (Date.now() - this.lastSupabaseSyncCompletedAt < 1200) return;
+          this.triggerActionSync(180);
+        })
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'sales',
+          },
+          () => {
+            if (this.isResetting || this.autoSyncMode !== 'live') return;
+            if (Date.now() - this.lastSupabaseSyncCompletedAt < 1200) return;
+            this.triggerActionSync(220);
+          }
+        )
         .on(
           'postgres_changes',
           {
@@ -592,7 +624,12 @@ class CrossDeviceSyncService {
       return success;
     };
 
+    const didMutateLocally = this.hasPendingLocalMutation || Boolean(options?.isNewSetup);
+    this.hasPendingLocalMutation = false;
+
     // --- STEP 1: Attempt Express Backend Sync ---
+    let expressSyncedOk = false;
+    let expressSyncUrl: string | null = null;
     const postUrlsToTry: string[] = [];
     const customUrl = this.getBackendUrl();
     if (customUrl) {
@@ -635,7 +672,9 @@ class CrossDeviceSyncService {
 
           if (result.success && result.state) {
             const serverResetEpoch = Number(result.resetEpoch || result.state.resetEpoch || 0);
-            if (result.wasReset || result.state.isReset) {
+            const isResetState = Boolean(result.wasReset || result.state.isReset);
+
+            if (isResetState) {
               if (serverResetEpoch > 0) this.setClientResetEpoch(serverResetEpoch);
               storageService.resetEverything(false);
               this.broadcastForceReset(serverResetEpoch || this.getClientResetEpoch());
@@ -651,17 +690,6 @@ class CrossDeviceSyncService {
               storageService.hydrateFromServer(result.state, syncStartedAt);
             }
 
-            this.updateState({
-              status: 'synced',
-              mode: 'server',
-              lastSyncedAt: result.serverTime || new Date().toISOString(),
-              message:
-                result.wasReset || result.state.isReset
-                  ? 'Factory reset synchronized'
-                  : 'Server synced (Express Cloud)',
-              serverVersion: result.version || this.syncState.serverVersion + 1,
-            });
-
             if (options?.isNewSetup && isSupabaseConfigured()) {
               void getSupabase()
                 .then((supa) => {
@@ -674,13 +702,32 @@ class CrossDeviceSyncService {
                 .catch(() => {});
             }
 
+            expressSyncedOk = true;
+            expressSyncUrl = targetUrl;
+
+            this.updateState({
+              status: 'synced',
+              mode: 'server',
+              lastSyncedAt: result.serverTime || new Date().toISOString(),
+              message: isResetState
+                ? 'Factory reset synchronized'
+                : 'Server synced (Express Cloud)',
+              serverVersion: result.version || this.syncState.serverVersion + 1,
+            });
+
             if (this.onDataChangedCallback) {
               this.onDataChangedCallback();
             }
-            if (!result.wasReset && !result.state.isReset) {
+            if (!isResetState) {
               this.broadcastLocalChange();
             }
-            return finishSync(true);
+
+            // If this is a Factory Reset or Supabase is not configured, stop here.
+            // Otherwise continue into Step 2 so Express and Supabase (e.g. sappy.work) stay unified!
+            if (isResetState || !isSupabaseConfigured()) {
+              return finishSync(true);
+            }
+            break;
           }
         }
       } catch {
@@ -922,21 +969,7 @@ class CrossDeviceSyncService {
 
               const mappedCustomers = remoteCustomers
                 .filter((c: any) => !delSet.has(c.id) && !c.id.startsWith('__system_'))
-                .map((c: any) => ({
-                  id: c.id,
-                  name: c.name,
-                  companyName: c.company_name || undefined,
-                  phone: c.phone,
-                  email: c.email || undefined,
-                  address: c.address || undefined,
-                  taxNumber: c.tax_number || undefined,
-                  creditBalance: Number(c.credit_balance || 0),
-                  creditLimit: Number(c.credit_limit || 500),
-                  totalPurchased: Number(c.total_purchased || 0),
-                  notes: c.notes || undefined,
-                  createdAt: c.created_at || new Date().toISOString(),
-                  updatedAt: c.updated_at || undefined,
-                }));
+                .map((c: any) => decodeCustomerFromRemoteRow(c));
               storageService.mergeCustomersFromRemote(mappedCustomers, syncStartedAt);
               }
             }
@@ -955,7 +988,7 @@ class CrossDeviceSyncService {
                   credit_balance: c.creditBalance,
                   credit_limit: c.creditLimit,
                   total_purchased: c.totalPurchased,
-                  notes: c.notes || null,
+                  notes: encodeCustomerNotesWithMeta(c),
                 }))
               );
               if (custErr && (custErr.code === '42501' || custErr.message?.includes('row-level security'))) {
@@ -966,42 +999,20 @@ class CrossDeviceSyncService {
             console.warn('Supabase customer sync notice:', cErr);
           }
 
-          // 3. Sales Sync
+          // 3. Sales Sync (preserving full refund/return metadata via syncMetadataCodec)
           try {
             if (!options?.isNewSetup) {
               const { data: remoteSales } = await client.from('sales').select('*');
               if (remoteSales && Array.isArray(remoteSales) && remoteSales.length > 0) {
-                const mappedSales: Sale[] = remoteSales.map((s: any) => ({
-                  id: s.id,
-                  invoiceNumber: s.invoice_number,
-                  timestamp: s.timestamp || new Date().toISOString(),
-                  customerId: s.customer_id || undefined,
-                  customerName: s.customer_name,
-                  customerPhone: s.customer_phone || undefined,
-                  customerEmail: s.customer_email || undefined,
-                  customerAddress: s.customer_address || undefined,
-                  subtotal: Number(s.subtotal || 0),
-                  taxRate: Number(s.tax_rate || 0),
-                  taxAmount: Number(s.tax_amount || 0),
-                  discountAmount: Number(s.discount_amount || 0),
-                  totalAmount: Number(s.total_amount || 0),
-                  totalCost: Number(s.total_cost || 0),
-                  grossProfit: Number(s.gross_profit || 0),
-                  paymentMethod: s.payment_method,
-                  amountTendered: Number(s.amount_tendered || 0),
-                  changeGiven: Number(s.change_given || 0),
-                  isCreditPaid: s.is_credit_paid ?? true,
-                  creditDueDate: s.credit_due_date || undefined,
-                  paidAmount: Number(s.paid_amount || 0),
-                  notes: s.notes || undefined,
-                  items: Array.isArray(s.items) ? s.items : [],
-                }));
+                const mappedSales: Sale[] = remoteSales.map((s: any) => decodeSaleFromRemoteRow(s));
                 const localSales = storageService.getSales();
                 const salesMap = new Map(localSales.map((s) => [s.id, s]));
                 for (const rs of mappedSales) {
                   const existing = salesMap.get(rs.id);
-                  if (existing && existing.isReturned) {
-                    salesMap.set(rs.id, { ...rs, ...existing });
+                  if (existing && existing.isReturned && !rs.isReturned) {
+                    salesMap.set(rs.id, { ...rs, ...existing, isReturned: true, status: 'returned' });
+                  } else if (rs.isReturned && existing) {
+                    salesMap.set(rs.id, { ...existing, ...rs, isReturned: true, status: 'returned' });
                   } else {
                     salesMap.set(rs.id, rs);
                   }
@@ -1035,7 +1046,7 @@ class CrossDeviceSyncService {
                   is_credit_paid: s.isCreditPaid,
                   credit_due_date: s.creditDueDate || null,
                   paid_amount: s.paidAmount || 0,
-                  notes: s.notes || null,
+                  notes: encodeSaleNotesWithReturnMetadata(s),
                   items: s.items || [],
                 }))
               );
@@ -1248,6 +1259,37 @@ class CrossDeviceSyncService {
             return finishSync(false);
           }
 
+          this.lastSupabaseSyncCompletedAt = Date.now();
+
+          // If Express also synced in Step 1, mirror the merged post-Supabase state back to Express immediately
+          if (expressSyncedOk && expressSyncUrl && !this.isResetting && !options?.isNewSetup) {
+            try {
+              const mirrorController = new AbortController();
+              const mirrorTimeout = setTimeout(() => mirrorController.abort(), 2000);
+              await fetch(expressSyncUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  payload: storageService.getAllData(),
+                  isNewSetup: false,
+                  clientResetEpoch: this.getClientResetEpoch(),
+                }),
+                signal: mirrorController.signal,
+              }).catch(() => {});
+              clearTimeout(mirrorTimeout);
+            } catch {}
+          }
+
+          if (didMutateLocally && this.realtimeChannel && !this.isResetting) {
+            try {
+              void this.realtimeChannel.send({
+                type: 'broadcast',
+                event: 'pos_sync_ping',
+                payload: { clientId: this.instanceId, ts: Date.now() },
+              });
+            } catch {}
+          }
+
           this.updateState({
             status: 'synced',
             mode: 'supabase',
@@ -1265,6 +1307,10 @@ class CrossDeviceSyncService {
           console.warn('Supabase sync warning:', supabaseErr?.message || supabaseErr);
         }
       }
+    }
+
+    if (expressSyncedOk) {
+      return finishSync(true);
     }
 
     // --- STEP 3: Fallback to Local Offline Storage ---

@@ -205,6 +205,8 @@ export default function App() {
     }
     if (txSales.length === 0) {
       setActiveInvoice(null);
+    } else {
+      setActiveInvoice((prev) => (prev ? txSales.find((s) => s.id === prev.id) || null : null));
     }
 
     // If all users have been wiped (e.g. Reset Everything), sign out immediately and clear UI state
