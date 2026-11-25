@@ -27,7 +27,7 @@ import { getSupabase } from '../lib/supabase.ts';
 import { SappyLogo } from './SappyLogo.tsx';
 
 interface AuthPageProps {
-  onAuthSuccess: (user: AppUser) => void;
+  onAuthSuccess: (user: AppUser, options?: { isNewSetup?: boolean }) => void;
   onClose?: () => void; // Optional if shown as modal
   initialMode?: 'login' | 'signup' | 'setup';
   isModal?: boolean;
@@ -84,6 +84,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     } else {
       setSelectedStaffUser(null);
       setEmail('');
+      setPassword('');
+      setConfirmPassword('');
+      setPinCode('');
     }
   }, [initialMode]);
 
@@ -95,6 +98,14 @@ export const AuthPage: React.FC<AuthPageProps> = ({
       if (users.length === 0) {
         setSelectedStaffUser(null);
         setEmail('');
+        setPassword('');
+        setConfirmPassword('');
+        setFullName('');
+        setPhone('');
+        setPinCode('');
+        setStoreName('Sappy Stationary');
+        setCurrencySymbol('Br ');
+        setTaxRate('15');
         setMode('setup');
       } else {
         setSelectedStaffUser((prev) => {
@@ -149,6 +160,12 @@ export const AuthPage: React.FC<AuthPageProps> = ({
       return;
     }
 
+    if (pinCode.trim() && !/^\d{4}$/.test(pinCode.trim())) {
+      setError('Quick Terminal PIN must be exactly 4 numeric digits.');
+      setLoading(false);
+      return;
+    }
+
     try {
       // 1. Save configured store settings
       const currentConfig = storageService.getStoreConfig();
@@ -161,12 +178,6 @@ export const AuthPage: React.FC<AuthPageProps> = ({
         currencyCode: currencyCode,
         defaultTaxRate: parseFloat(taxRate) || 15,
       });
-
-      if (pinCode.trim() && !/^\d{4}$/.test(pinCode.trim())) {
-        setError('Quick Terminal PIN must be exactly 4 numeric digits.');
-        setLoading(false);
-        return;
-      }
 
       // 2. Register master Store Owner user
       const ownerUser = storageService.registerUser({
@@ -186,11 +197,11 @@ export const AuthPage: React.FC<AuthPageProps> = ({
       // Push newly configured store & owner to cloud server immediately (with isNewSetup so reset flag clears cleanly)
       await Promise.race([
         crossDeviceSyncService.syncNow({ isNewSetup: true }).catch(() => false),
-        new Promise((resolve) => setTimeout(resolve, 1500)),
+        new Promise((resolve) => setTimeout(resolve, 4000)),
       ]);
       crossDeviceSyncService.broadcastLocalChange();
 
-      onAuthSuccess(ownerUser);
+      onAuthSuccess(ownerUser, { isNewSetup: true });
     } catch (err: any) {
       setError(err?.message || 'Failed to complete setup. Please check your entries.');
     } finally {
@@ -397,11 +408,17 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   onClick={async () => {
                     setLoading(true);
                     setError(null);
+                    setSuccessMsg(null);
                     await crossDeviceSyncService.initialSync(true);
                     const users = storageService.getUsers();
                     setStaffUsers(users);
-                    setMode('login');
-                    setSuccessMsg(`Store accounts ready. Select your profile to enter.`);
+                    if (users.length > 0) {
+                      setMode('login');
+                      setSuccessMsg(`Store accounts ready (${users.length}). Select your profile to enter.`);
+                    } else {
+                      setMode('setup');
+                      setSuccessMsg('Cloud is in clean Factory Setup state. Register your Store Owner account below.');
+                    }
                     setLoading(false);
                   }}
                   disabled={loading}
@@ -697,10 +714,16 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                       onClick={async () => {
                         setLoading(true);
                         setError(null);
+                        setSuccessMsg(null);
                         await crossDeviceSyncService.syncNow();
                         const users = storageService.getUsers();
                         setStaffUsers(users);
-                        setSuccessMsg(`Terminals synchronized! (${users.length} staff profile${users.length === 1 ? '' : 's'} available)`);
+                        if (users.length === 0) {
+                          setMode('setup');
+                          setSuccessMsg('Cloud is in clean Factory Setup state. Register your Store Owner account below.');
+                        } else {
+                          setSuccessMsg(`Terminals synchronized! (${users.length} staff profile${users.length === 1 ? '' : 's'} available)`);
+                        }
                         setLoading(false);
                       }}
                       className="text-[10px] text-amber-400 hover:text-amber-300 flex items-center gap-1 cursor-pointer font-mono"
@@ -852,10 +875,16 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   onClick={async () => {
                     setLoading(true);
                     setError(null);
+                    setSuccessMsg(null);
                     await crossDeviceSyncService.syncNow();
                     const users = storageService.getUsers();
                     setStaffUsers(users);
-                    setSuccessMsg(`Cloud terminals synchronized! (${users.length} staff profile${users.length === 1 ? '' : 's'} available)`);
+                    if (users.length === 0) {
+                      setMode('setup');
+                      setSuccessMsg('Cloud is in clean Factory Setup state. Register your Store Owner account below.');
+                    } else {
+                      setSuccessMsg(`Cloud terminals synchronized! (${users.length} staff profile${users.length === 1 ? '' : 's'} available)`);
+                    }
                     setLoading(false);
                   }}
                   className="hover:text-white flex items-center gap-1 text-[11px] cursor-pointer font-mono"

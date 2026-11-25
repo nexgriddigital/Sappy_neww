@@ -6,7 +6,7 @@ export const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_Ym9JdgLbipg5KGouA2UGEg_
 
 // Read from Vite environment variables or defaults
 const envUrl = (((import.meta as any).env?.VITE_SUPABASE_URL || DEFAULT_SUPABASE_URL) as string).trim();
-const envAnonKey = (((import.meta as any).env?.VITE_SUPABASE_ANON_KEY || DEFAULT_SUPABASE_ANON_KEY) as string).trim();
+const envAnonKey = (((import.meta as any).env?.VITE_SUPABASE_ANON_KEY || (import.meta as any).env?.VITE_SUPABASE_PUBLISHABLE_KEY || DEFAULT_SUPABASE_ANON_KEY) as string).trim();
 
 // Stored client singleton (instantiated lazily on first async use)
 let activeClient: SupabaseClient | null = null;

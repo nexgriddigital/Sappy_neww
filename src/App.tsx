@@ -207,9 +207,27 @@ export default function App() {
       setActiveInvoice(null);
     }
 
-    // If all users have been wiped (e.g. Reset Everything), sign out immediately to prompt First-Time Setup
+    // If all users have been wiped (e.g. Reset Everything), sign out immediately and clear UI state
     if (usrs.length === 0) {
       setCurrentUser(null);
+      setActiveTab('dashboard');
+      setWelcomeUser(null);
+      setIsAuthModalOpen(false);
+      setIsCloudSyncModalOpen(false);
+      setIsChangeCredentialsOpen(false);
+      setCriticalChallenge(null);
+      setIsCommandPaletteOpen(false);
+      setIsCustomerDisplayOpen(false);
+      setActiveInvoice(null);
+      setActiveCartData({
+        cart: [],
+        subtotal: 0,
+        discountAmount: 0,
+        taxAmount: 0,
+        taxRate: 0,
+        grandTotal: 0,
+        customer: null,
+      });
     } else {
       const freshSession = storageService.getCurrentUser();
       if (freshSession) {
@@ -484,10 +502,13 @@ export default function App() {
   };
 
   // User Authentication
-  const handleAuthSuccess = (user: AppUser) => {
+  const handleAuthSuccess = (user: AppUser, options?: { isNewSetup?: boolean }) => {
     setCurrentUser(user);
     setIsAuthModalOpen(false);
-    crossDeviceSyncService.triggerActionSync(10);
+    reloadData();
+    if (!options?.isNewSetup) {
+      crossDeviceSyncService.triggerActionSync(10);
+    }
     if (!storageService.hasUserCompletedWelcome(user.id)) {
       setWelcomeUser(user);
     }

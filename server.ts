@@ -47,14 +47,23 @@ function getPool(customUrl?: string): pg.Pool | null {
     dbPool = null;
   }
   if (!dbPool) {
-    dbPool = new pg.Pool({
-      connectionString,
-      ssl: connectionString.includes('localhost') || connectionString.includes('127.0.0.1')
-        ? false
-        : { rejectUnauthorized: false },
-      connectionTimeoutMillis: 5000,
-      idleTimeoutMillis: 10000,
-    });
+    try {
+      dbPool = new pg.Pool({
+        connectionString,
+        ssl: connectionString.includes('localhost') || connectionString.includes('127.0.0.1')
+          ? false
+          : { rejectUnauthorized: false },
+        connectionTimeoutMillis: 5000,
+        idleTimeoutMillis: 10000,
+      });
+    } catch {
+      console.warn('[AI Studio] PostgreSQL Pool init failed — mock active');
+      dbPool = {
+        query: async () => ({ rows: [] }),
+        connect: async () => ({ query: async () => ({ rows: [] }), release: () => {} }),
+        end: async () => {},
+      } as unknown as pg.Pool;
+    }
   }
   return dbPool;
 }
@@ -195,6 +204,16 @@ const DEFAULT_STARTER_PRODUCTS = [
   }
 ];
 
+const pickPublicSupabaseKey = (...candidates: Array<string | undefined>): string => {
+  for (const c of candidates) {
+    const val = (c || '').trim();
+    if (val && !val.startsWith('sb_secret_')) {
+      return val;
+    }
+  }
+  return '';
+};
+
 const DEFAULT_SERVER_CONFIG = {
   storeName: 'Sappy Stationary',
   tagline: 'Quality Paper, Pens, Art & Office Essentials',
@@ -210,8 +229,31 @@ const DEFAULT_SERVER_CONFIG = {
     'CBE: 1000452354504 (Yohannes Leulseged) / 1000126845883 (Azeb Eshetu) | Awash: 013201292764800 (Yohannes Leulseged) | Telebirr: 0980442353 (Yohannes Leulseged) | Abyssinia: 194809058 (Yohannes Leulseged) | Dashen: 5889696877011 (Yohannes Leulseged)',
   masterPasscode: 'Sappy#1313',
   supabaseUrl: (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || 'https://fegfrjhxxpojmalytbku.supabase.co').trim(),
-  supabaseAnonKey: (process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '').trim(),
+  supabaseAnonKey: pickPublicSupabaseKey(
+    process.env.VITE_SUPABASE_ANON_KEY,
+    process.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+    process.env.SUPABASE_ANON_KEY,
+    process.env.SUPABASE_PUBLISHABLE_KEY
+  ),
   databaseUrl: (process.env.DATABASE_URL || '').trim(),
+};
+
+const CLEAN_SERVER_CONFIG_DEFAULTS = {
+  storeName: 'Sappy Stationary',
+  tagline: 'Quality Paper, Pens, Art & Office Essentials',
+  address: '',
+  phone: '',
+  email: '',
+  taxId: '',
+  currencySymbol: 'Br ',
+  currencyCode: 'ETB',
+  defaultTaxRate: 15,
+  receiptFooter: 'Thank you for your business!',
+  bankDetails: '',
+  paymentAccounts: [],
+  masterPasscode: 'Sappy#1313',
+  supabaseUrl: DEFAULT_SERVER_CONFIG.supabaseUrl,
+  supabaseAnonKey: DEFAULT_SERVER_CONFIG.supabaseAnonKey,
 };
 
 const DEFAULT_SERVER_USERS = [
@@ -328,14 +370,24 @@ function loadServerState(): PosState {
         parsed.config = DEFAULT_SERVER_CONFIG;
         changed = true;
       } else {
-        // Inject DB secrets from env if missing
+        // Inject public Supabase config from env if missing (never expose secret keys to client config)
         const envSupabaseUrl = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || 'https://fegfrjhxxpojmalytbku.supabase.co').trim();
-        const envSupabaseKey = (process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '').trim();
+        const envSupabaseKey = pickPublicSupabaseKey(
+          process.env.VITE_SUPABASE_ANON_KEY,
+          process.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+          process.env.SUPABASE_ANON_KEY,
+          process.env.SUPABASE_PUBLISHABLE_KEY
+        );
         if (envSupabaseUrl && (!parsed.config.supabaseUrl || parsed.config.supabaseUrl.includes('your-project'))) {
           parsed.config.supabaseUrl = envSupabaseUrl;
           changed = true;
         }
-        if (envSupabaseKey && (!parsed.config.supabaseAnonKey || parsed.config.supabaseAnonKey.includes('...'))) {
+        if (
+          envSupabaseKey &&
+          (!parsed.config.supabaseAnonKey ||
+            parsed.config.supabaseAnonKey.includes('...') ||
+            String(parsed.config.supabaseAnonKey).startsWith('sb_secret_'))
+        ) {
           parsed.config.supabaseAnonKey = envSupabaseKey;
           changed = true;
         }
@@ -347,21 +399,11 @@ function loadServerState(): PosState {
         changed = true;
       }
 
-      // Only ensure legacy default owners if this store has never been factory-reset
-      if (!wasPreviouslyReset) {
-        if (!parsed.users || parsed.users.length === 0) {
-          parsed.users = DEFAULT_SERVER_USERS;
-          changed = true;
-        } else {
-          if (!parsed.users.some((u: any) => (u.email || '').toLowerCase().trim() === 'amanuealhailu007@gmail.com')) {
-            parsed.users.unshift(DEFAULT_SERVER_USERS[0]);
-            changed = true;
-          }
-          if (!parsed.users.some((u: any) => (u.email || '').toLowerCase().trim() === 'yohannesleulseged802@gmail.com')) {
-            parsed.users.push(DEFAULT_SERVER_USERS[1]);
-            changed = true;
-          }
-        }
+      // Only seed legacy default owners if the store has never been initialized or reset and has no users
+      const hasAnyUsers = Array.isArray(parsed.users) && parsed.users.length > 0;
+      if (!wasPreviouslyReset && !parsed.initialized && !hasAnyUsers) {
+        parsed.users = DEFAULT_SERVER_USERS;
+        changed = true;
       }
 
       if (changed) {
@@ -403,8 +445,297 @@ function saveServerState(state: PosState): void {
 
 let serverState: PosState = loadServerState();
 
+let lastTombstoneCheckAt = 0;
+
+async function markSupabaseTombstoneSetupCompleted(
+  baseUrl: string,
+  apiKey: string,
+  fallbackEpoch: number
+): Promise<void> {
+  if (!baseUrl || !apiKey) return;
+  const hdrs = {
+    apikey: apiKey,
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+    Prefer: 'return=minimal',
+  };
+
+  try {
+    await fetchWithTimeout(
+      `${baseUrl}/rest/v1/customers?id=eq.__system_staff_registry__`,
+      { method: 'DELETE', headers: hdrs },
+      4000
+    ).catch(() => {});
+
+    const getRes = await fetchWithTimeout(
+      `${baseUrl}/rest/v1/customers?id=eq.__system_reset_tombstone__&select=id,notes`,
+      { method: 'GET', headers: { apikey: apiKey, Authorization: `Bearer ${apiKey}` } },
+      3000
+    ).catch(() => null);
+
+    if (getRes && getRes.ok) {
+      const rows = (await getRes.json()) as Array<{ id: string; notes?: string }>;
+      if (Array.isArray(rows) && rows.length > 0) {
+        let resetAt = new Date().toISOString();
+        let resetEpoch = fallbackEpoch;
+        try {
+          const parsed = JSON.parse(rows[0].notes || '{}');
+          if (parsed.resetAt) resetAt = parsed.resetAt;
+          if (parsed.resetEpoch) resetEpoch = Math.max(Number(parsed.resetEpoch) || 0, fallbackEpoch);
+        } catch {}
+
+        await fetchWithTimeout(
+          `${baseUrl}/rest/v1/customers?on_conflict=id`,
+          {
+            method: 'POST',
+            headers: {
+              ...hdrs,
+              Prefer: 'resolution=merge-duplicates,return=minimal',
+            },
+            body: JSON.stringify({
+              id: '__system_reset_tombstone__',
+              name: '__SYSTEM_RESET_TOMBSTONE__',
+              phone: '+251 00 000 0000',
+              credit_balance: 0,
+              credit_limit: 0,
+              total_purchased: 0,
+              notes: JSON.stringify({
+                resetAt,
+                resetEpoch,
+                status: 'setup_completed',
+                setupCompletedAt: new Date().toISOString(),
+              }),
+            }),
+          },
+          4000
+        ).catch(() => {});
+      }
+    }
+  } catch {}
+}
+
+async function reconcileSupabaseResetTombstone(
+  supabaseUrlInput?: string,
+  supabaseKeyInput?: string,
+  force = false
+): Promise<boolean> {
+  const now = Date.now();
+  if (!force && now - lastTombstoneCheckAt < 1500) {
+    return false;
+  }
+  lastTombstoneCheckAt = now;
+
+  const baseUrl = String(
+    supabaseUrlInput ||
+      serverState.config?.supabaseUrl ||
+      process.env.VITE_SUPABASE_URL ||
+      process.env.SUPABASE_URL ||
+      DEFAULT_SERVER_SUPABASE_URL
+  )
+    .trim()
+    .replace(/\/+$/, '');
+  const apiKey = String(
+    process.env.SUPABASE_SECRET_KEY ||
+      process.env.SUPABASE_SERVICE_ROLE_KEY ||
+      supabaseKeyInput ||
+      serverState.config?.supabaseAnonKey ||
+      process.env.VITE_SUPABASE_ANON_KEY ||
+      process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+      process.env.SUPABASE_ANON_KEY ||
+      process.env.SUPABASE_PUBLISHABLE_KEY ||
+      DEFAULT_SERVER_SUPABASE_KEY
+  ).trim();
+
+  if (!baseUrl || !apiKey) return false;
+
+  try {
+    const res = await fetchWithTimeout(
+      `${baseUrl}/rest/v1/customers?id=eq.__system_reset_tombstone__&select=id,notes`,
+      { method: 'GET', headers: { apikey: apiKey, Authorization: `Bearer ${apiKey}` } },
+      1200
+    );
+    if (!res.ok) return false;
+    const rows = (await res.json()) as Array<{ id: string; notes?: string }>;
+    if (!Array.isArray(rows) || rows.length === 0) return false;
+
+    let tombEpoch = 0;
+    let tombStatus = 'awaiting_setup';
+    try {
+      const parsed = JSON.parse(rows[0].notes || '{}');
+      tombEpoch = Number(parsed.resetEpoch || 0);
+      if (parsed.status) tombStatus = String(parsed.status);
+    } catch {}
+
+    const currentEpoch = Number(serverState.resetEpoch || 0);
+    if (tombEpoch <= 0 || tombEpoch <= currentEpoch) {
+      return false;
+    }
+
+    // Remote reset epoch is newer than this Express server's epoch -> adopt reset cleanly!
+    serverState = {
+      products: [],
+      customers: [],
+      sales: [],
+      expenses: [],
+      creditPayments: [],
+      config: null,
+      users: [],
+      lastSyncedAt: new Date().toISOString(),
+      version: serverState.version + 1,
+      isReset: tombStatus !== 'setup_completed',
+      initialized: true,
+      resetEpoch: tombEpoch,
+    };
+
+    if (tombStatus === 'setup_completed') {
+      const readHeaders = { apikey: apiKey, Authorization: `Bearer ${apiKey}` };
+      try {
+        const [prodRes, custRes, saleRes, payRes, expRes, userRes] = await Promise.allSettled([
+          fetchWithTimeout(`${baseUrl}/rest/v1/products?select=*`, { method: 'GET', headers: readHeaders }, 1500),
+          fetchWithTimeout(`${baseUrl}/rest/v1/customers?select=*`, { method: 'GET', headers: readHeaders }, 1500),
+          fetchWithTimeout(`${baseUrl}/rest/v1/sales?select=*`, { method: 'GET', headers: readHeaders }, 1500),
+          fetchWithTimeout(`${baseUrl}/rest/v1/credit_payments?select=*`, { method: 'GET', headers: readHeaders }, 1500),
+          fetchWithTimeout(`${baseUrl}/rest/v1/expenses?select=*`, { method: 'GET', headers: readHeaders }, 1500),
+          fetchWithTimeout(`${baseUrl}/rest/v1/app_users?select=*`, { method: 'GET', headers: readHeaders }, 1500),
+        ]);
+
+        if (prodRes.status === 'fulfilled' && prodRes.value.ok) {
+          const prods = (await prodRes.value.json()) as any[];
+          if (Array.isArray(prods)) {
+            serverState.products = prods.map((p) => ({
+              id: p.id,
+              sku: p.sku,
+              barcode: p.barcode || '',
+              name: p.name,
+              category: p.category,
+              costPrice: Number(p.cost_price || 0),
+              sellingPrice: Number(p.selling_price || 0),
+              stockLevel: Number(p.stock_level || 0),
+              lowStockThreshold: Number(p.low_stock_threshold || 5),
+              unit: p.unit || 'pcs',
+              description: p.description || '',
+              updatedAt: p.updated_at || undefined,
+            }));
+          }
+        }
+        if (custRes.status === 'fulfilled' && custRes.value.ok) {
+          const custs = (await custRes.value.json()) as any[];
+          if (Array.isArray(custs)) {
+            serverState.customers = custs
+              .filter((c) => c.id && !String(c.id).startsWith('__system_'))
+              .map((c) => ({
+                id: c.id,
+                name: c.name,
+                companyName: c.company_name || undefined,
+                phone: c.phone,
+                email: c.email || undefined,
+                address: c.address || undefined,
+                taxNumber: c.tax_number || undefined,
+                creditBalance: Number(c.credit_balance || 0),
+                creditLimit: Number(c.credit_limit || 500),
+                totalPurchased: Number(c.total_purchased || 0),
+                notes: c.notes || undefined,
+                createdAt: c.created_at || new Date().toISOString(),
+                updatedAt: c.updated_at || undefined,
+              }));
+          }
+        }
+        if (saleRes.status === 'fulfilled' && saleRes.value.ok) {
+          const sales = (await saleRes.value.json()) as any[];
+          if (Array.isArray(sales)) {
+            serverState.sales = sales.map((s) => ({
+              id: s.id,
+              invoiceNumber: s.invoice_number,
+              timestamp: s.timestamp || new Date().toISOString(),
+              customerId: s.customer_id || undefined,
+              customerName: s.customer_name,
+              customerPhone: s.customer_phone || undefined,
+              customerEmail: s.customer_email || undefined,
+              customerAddress: s.customer_address || undefined,
+              subtotal: Number(s.subtotal || 0),
+              taxRate: Number(s.tax_rate || 0),
+              taxAmount: Number(s.tax_amount || 0),
+              discountAmount: Number(s.discount_amount || 0),
+              totalAmount: Number(s.total_amount || 0),
+              totalCost: Number(s.total_cost || 0),
+              grossProfit: Number(s.gross_profit || 0),
+              paymentMethod: s.payment_method,
+              amountTendered: Number(s.amount_tendered || 0),
+              changeGiven: Number(s.change_given || 0),
+              isCreditPaid: s.is_credit_paid ?? true,
+              creditDueDate: s.credit_due_date || undefined,
+              paidAmount: Number(s.paid_amount || 0),
+              notes: s.notes || undefined,
+              items: Array.isArray(s.items) ? s.items : [],
+            }));
+          }
+        }
+        if (payRes.status === 'fulfilled' && payRes.value.ok) {
+          const pays = (await payRes.value.json()) as any[];
+          if (Array.isArray(pays)) {
+            serverState.creditPayments = pays.map((p) => ({
+              id: p.id,
+              customerId: p.customer_id,
+              customerName: p.customer_name,
+              saleId: p.sale_id || undefined,
+              amount: Number(p.amount || 0),
+              paymentMethod: p.payment_method || 'cash',
+              timestamp: p.timestamp || new Date().toISOString(),
+              receiptNumber: p.receipt_number,
+              notes: p.notes || undefined,
+            }));
+          }
+        }
+        if (expRes.status === 'fulfilled' && expRes.value.ok) {
+          const exps = (await expRes.value.json()) as any[];
+          if (Array.isArray(exps)) {
+            serverState.expenses = exps.map((e) => ({
+              id: e.id,
+              date: e.date,
+              category: e.category,
+              title: e.title,
+              amount: Number(e.amount || 0),
+              paymentMethod: e.payment_method || 'cash',
+              payee: e.payee,
+              receiptNumber: e.receipt_number || undefined,
+              notes: e.notes || undefined,
+              createdAt: e.created_at || new Date().toISOString(),
+            }));
+          }
+        }
+        if (userRes.status === 'fulfilled' && userRes.value.ok) {
+          const usrs = (await userRes.value.json()) as any[];
+          if (Array.isArray(usrs)) {
+            serverState.users = normalizeAndDedupeUsers(
+              usrs.map((u) => ({
+                id: u.id,
+                email: u.email,
+                fullName: u.full_name || u.fullName || String(u.email || '').split('@')[0],
+                role: u.role || 'owner',
+                storeName: u.store_name || u.storeName || 'Sappy Stationary',
+                phone: u.phone || undefined,
+                pinCode: u.pin_code || u.pinCode || undefined,
+                status: u.status || 'active',
+                createdAt: u.created_at || u.createdAt || new Date().toISOString(),
+                updatedAt: u.updated_at || u.updatedAt || undefined,
+                notes: u.notes || undefined,
+              }))
+            );
+          }
+        }
+      } catch {}
+    }
+
+    saveServerState(serverState);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Multi-Device Sync: Fetch Canonical Server State
-app.get('/api/pos/state', (_req: Request, res: Response) => {
+app.get('/api/pos/state', async (_req: Request, res: Response) => {
+  await reconcileSupabaseResetTombstone();
   serverState.users = normalizeAndDedupeUsers(serverState.users || []);
   return res.json({
     success: true,
@@ -422,10 +753,14 @@ app.get('/api/pos/state', (_req: Request, res: Response) => {
 });
 
 // Multi-Device Sync: Bi-Directional Merge & Push
-app.post('/api/pos/sync', (req: Request, res: Response) => {
+app.post('/api/pos/sync', async (req: Request, res: Response) => {
   const { payload, isNewSetup, clientResetEpoch } = req.body;
   if (!payload) {
     return res.status(400).json({ success: false, error: 'Payload is required' });
+  }
+
+  if (!isNewSetup) {
+    await reconcileSupabaseResetTombstone(payload.config?.supabaseUrl, payload.config?.supabaseAnonKey);
   }
 
   const serverResetEpoch = Number(serverState.resetEpoch || 0);
@@ -461,15 +796,44 @@ app.post('/api/pos/sync', (req: Request, res: Response) => {
 
   try {
     // Clean slate transition when completing First-Time Setup after a Factory Reset
-    if (isNewSetup && serverState.isReset) {
+    if (isNewSetup && (serverState.isReset || incomingResetEpoch >= serverResetEpoch)) {
       serverState.products = Array.isArray(payload.products) ? payload.products : [];
       serverState.customers = Array.isArray(payload.customers) ? payload.customers : [];
       serverState.sales = Array.isArray(payload.sales) ? payload.sales : [];
       serverState.expenses = Array.isArray(payload.expenses) ? payload.expenses : [];
       serverState.creditPayments = Array.isArray(payload.creditPayments) ? payload.creditPayments : [];
       serverState.users = normalizeAndDedupeUsers(Array.isArray(payload.users) ? payload.users : []);
+      serverState.config = payload.config && typeof payload.config === 'object'
+        ? { ...CLEAN_SERVER_CONFIG_DEFAULTS, ...payload.config }
+        : null;
       serverState.isReset = false;
       serverState.initialized = true;
+
+      // Update Supabase reset tombstone status to setup_completed (preserving resetEpoch so sleeping peers still reset!)
+      const supaBase = String(
+        payload.config?.supabaseUrl ||
+          process.env.VITE_SUPABASE_URL ||
+          process.env.SUPABASE_URL ||
+          DEFAULT_SERVER_SUPABASE_URL
+      )
+        .trim()
+        .replace(/\/+$/, '');
+      const supaKey = String(
+        process.env.SUPABASE_SECRET_KEY ||
+          process.env.SUPABASE_SERVICE_ROLE_KEY ||
+          payload.config?.supabaseAnonKey ||
+          process.env.VITE_SUPABASE_ANON_KEY ||
+          process.env.SUPABASE_ANON_KEY ||
+          process.env.SUPABASE_PUBLISHABLE_KEY ||
+          DEFAULT_SERVER_SUPABASE_KEY
+      ).trim();
+      if (supaBase && supaKey) {
+        void markSupabaseTombstoneSetupCompleted(
+          supaBase,
+          supaKey,
+          Math.max(serverResetEpoch, incomingResetEpoch)
+        );
+      }
     }
 
     const parseUpdatedTime = (iso?: string) => {
@@ -570,8 +934,12 @@ app.post('/api/pos/sync', (req: Request, res: Response) => {
     // 6. Merge Config (protect against blank overrides, allow clean disconnects)
     if (payload.config && typeof payload.config === 'object') {
       if (!serverState.config) {
+        const baseConfigDefaults =
+          serverState.resetEpoch && serverState.resetEpoch > 0
+            ? CLEAN_SERVER_CONFIG_DEFAULTS
+            : DEFAULT_SERVER_CONFIG;
         serverState.config = {
-          ...DEFAULT_SERVER_CONFIG,
+          ...baseConfigDefaults,
           ...payload.config,
         };
       } else {
@@ -664,10 +1032,13 @@ async function wipeSupabaseRestTables(
     .trim()
     .replace(/\/+$/, '');
   const apiKey = String(
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
+      process.env.SUPABASE_SERVICE_ROLE_KEY ||
       supabaseKeyInput ||
       process.env.VITE_SUPABASE_ANON_KEY ||
+      process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
       process.env.SUPABASE_ANON_KEY ||
+      process.env.SUPABASE_PUBLISHABLE_KEY ||
       DEFAULT_SERVER_SUPABASE_KEY
   ).trim();
 
@@ -695,7 +1066,7 @@ async function wipeSupabaseRestTables(
 
   const remainingCounts: Record<string, number> = {};
 
-  for (const table of tablesById) {
+  const wipeTable = async (table: string) => {
     try {
       await fetchWithTimeout(
         `${baseUrl}/rest/v1/${table}?id=not.is.null`,
@@ -716,10 +1087,10 @@ async function wipeSupabaseRestTables(
           for (let i = 0; i < rows.length; i += 40) {
             const batchIds = rows
               .slice(i, i + 40)
-              .map((r) => `"${String(r.id).replace(/"/g, '\\"')}"`)
+              .map((r) => encodeURIComponent(String(r.id)))
               .join(',');
             await fetchWithTimeout(
-              `${baseUrl}/rest/v1/${table}?id=in.(${encodeURIComponent(batchIds)})`,
+              `${baseUrl}/rest/v1/${table}?id=in.(${batchIds})`,
               { method: 'DELETE', headers },
               4500
             ).catch(() => {});
@@ -741,15 +1112,30 @@ async function wipeSupabaseRestTables(
     } catch {
       // Table may not exist or network unavailable
     }
-  }
+  };
 
-  try {
-    await fetchWithTimeout(
+  // Wipe FK-dependent child tables first, then parent tables
+  await Promise.allSettled([wipeTable('sale_items'), wipeTable('credit_payments')]);
+  await wipeTable('sales');
+  await Promise.allSettled([
+    wipeTable('expenses'),
+    wipeTable('products'),
+    wipeTable('customers'),
+    wipeTable('app_users'),
+    wipeTable('store_users'),
+    fetchWithTimeout(
       `${baseUrl}/rest/v1/store_settings?key=not.is.null`,
       { method: 'DELETE', headers },
       4500
-    );
-  } catch {}
+    ).catch(() => {}),
+  ]);
+
+  // Explicitly ensure system staff registry row is purged from customers
+  await fetchWithTimeout(
+    `${baseUrl}/rest/v1/customers?id=eq.__system_staff_registry__`,
+    { method: 'DELETE', headers },
+    4000
+  ).catch(() => {});
 
   // Write factory reset tombstone so Supabase-only peers wipe cleanly instead of re-uploading stale data
   try {
@@ -769,7 +1155,11 @@ async function wipeSupabaseRestTables(
           credit_balance: 0,
           credit_limit: 0,
           total_purchased: 0,
-          notes: JSON.stringify({ resetAt, resetEpoch: resetEpoch || Date.now() }),
+          notes: JSON.stringify({
+            resetAt,
+            resetEpoch: resetEpoch || Date.now(),
+            status: 'awaiting_setup',
+          }),
         }),
       },
       4500
@@ -783,6 +1173,7 @@ async function wipeSupabaseRestTables(
 app.post('/api/pos/reset', async (req: Request, res: Response) => {
   const prevConfig = serverState.config;
   const nextResetEpoch = Math.max(Date.now(), Number(serverState.resetEpoch || 0) + 1);
+  lastTombstoneCheckAt = Date.now();
   serverState = {
     products: [],
     customers: [],
@@ -881,11 +1272,14 @@ app.post('/api/pos/reset-transactions', async (req: Request, res: Response) => {
     .trim()
     .replace(/\/+$/, '');
   const apiKey = String(
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
+      process.env.SUPABASE_SERVICE_ROLE_KEY ||
       supabaseAnonKey ||
       serverState.config?.supabaseAnonKey ||
       process.env.VITE_SUPABASE_ANON_KEY ||
+      process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
       process.env.SUPABASE_ANON_KEY ||
+      process.env.SUPABASE_PUBLISHABLE_KEY ||
       DEFAULT_SERVER_SUPABASE_KEY
   ).trim();
 

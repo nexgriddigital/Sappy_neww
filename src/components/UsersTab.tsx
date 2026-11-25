@@ -57,7 +57,7 @@ export const UsersTab: React.FC<UsersTabProps> = ({
 
   // Keep users synchronized whenever props update from parent reloadData
   useEffect(() => {
-    if (propUsers && propUsers.length > 0) {
+    if (propUsers) {
       setUsers(propUsers);
     }
   }, [propUsers]);

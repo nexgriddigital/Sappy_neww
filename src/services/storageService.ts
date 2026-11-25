@@ -112,35 +112,64 @@ class StorageService {
     }
   }
 
+  private isCleanOrReset(): boolean {
+    if (typeof window === 'undefined') return false;
+    try {
+      if (localStorage.getItem(STORAGE_KEYS.INITIALIZED) === 'true') return true;
+      const epoch = Number(localStorage.getItem('sappy_pos_reset_epoch') || 0);
+      return Number.isFinite(epoch) && epoch > 0;
+    } catch {
+      return false;
+    }
+  }
+
   // --- Store Configuration ---
   getStoreConfig(): StoreConfig {
     const rawConfig = this.get<Partial<StoreConfig>>(STORAGE_KEYS.CONFIG, {});
+    const isFreshReset = Object.keys(rawConfig).length === 0 && this.isCleanOrReset();
+    const creds = getSupabaseCredentials();
     const config: StoreConfig = {
       ...INITIAL_STORE_CONFIG,
+      ...(isFreshReset
+        ? {
+            storeName: 'Sappy Stationary',
+            tagline: 'Quality Paper, Pens, Art & Office Essentials',
+            address: '',
+            phone: '',
+            email: '',
+            taxId: '',
+            bankDetails: '',
+            receiptFooter: 'Thank you for your business!',
+          }
+        : {}),
       ...rawConfig,
       storeName: rawConfig.storeName || INITIAL_STORE_CONFIG.storeName,
       currencySymbol: rawConfig.currencySymbol || INITIAL_STORE_CONFIG.currencySymbol,
       currencyCode: rawConfig.currencyCode || INITIAL_STORE_CONFIG.currencyCode,
-      taxId: rawConfig.taxId || INITIAL_STORE_CONFIG.taxId,
+      taxId: isFreshReset ? (rawConfig.taxId || '') : (rawConfig.taxId || INITIAL_STORE_CONFIG.taxId),
       defaultTaxRate: rawConfig.defaultTaxRate ?? INITIAL_STORE_CONFIG.defaultTaxRate,
       paymentAccounts:
         rawConfig.paymentAccounts && rawConfig.paymentAccounts.length > 0
           ? rawConfig.paymentAccounts
-          : STORE_PAYMENT_ACCOUNTS,
+          : isFreshReset
+            ? []
+            : STORE_PAYMENT_ACCOUNTS,
       masterPasscode: rawConfig.masterPasscode || DEFAULT_MASTER_PASSCODE,
     };
     let changed =
-      !rawConfig.currencySymbol ||
-      !rawConfig.currencyCode ||
-      !rawConfig.masterPasscode ||
-      !rawConfig.paymentAccounts ||
-      rawConfig.paymentAccounts.length === 0;
+      !isFreshReset &&
+      (!rawConfig.currencySymbol ||
+        !rawConfig.currencyCode ||
+        !rawConfig.masterPasscode ||
+        !rawConfig.paymentAccounts ||
+        rawConfig.paymentAccounts.length === 0);
 
-    // Upgrade legacy placeholder bankDetails to real store accounts
+    // Upgrade legacy placeholder bankDetails to real store accounts (only when not freshly reset)
     if (
-      !rawConfig.bankDetails ||
-      rawConfig.bankDetails.includes('1000123456789') ||
-      rawConfig.bankDetails.includes('0911234567')
+      !isFreshReset &&
+      (!rawConfig.bankDetails ||
+        rawConfig.bankDetails.includes('1000123456789') ||
+        rawConfig.bankDetails.includes('0911234567'))
     ) {
       config.bankDetails = INITIAL_STORE_CONFIG.bankDetails;
       changed = true;
@@ -154,16 +183,16 @@ class StorageService {
       changed = true;
     }
 
-    // Auto-populate Supabase DB secrets from build environment or permanent defaults
-    const envUrl = (((import.meta as any).env?.VITE_SUPABASE_URL || 'https://fegfrjhxxpojmalytbku.supabase.co') as string).trim();
-    const envKey = (((import.meta as any).env?.VITE_SUPABASE_ANON_KEY || 'sb_publishable_Ym9JdgLbipg5KGouA2UGEg_smmRkqd2') as string).trim();
+    // Auto-populate Supabase public config from build environment or permanent defaults
+    const envUrl = (creds.url || ((import.meta as any).env?.VITE_SUPABASE_URL || 'https://fegfrjhxxpojmalytbku.supabase.co') as string).trim();
+    const envKey = (creds.anonKey || ((import.meta as any).env?.VITE_SUPABASE_ANON_KEY || (import.meta as any).env?.VITE_SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_Ym9JdgLbipg5KGouA2UGEg_smmRkqd2') as string).trim();
     if (!config.supabaseUrl || config.supabaseUrl.includes('your-project')) {
       config.supabaseUrl = envUrl;
-      changed = true;
+      if (!isFreshReset) changed = true;
     }
-    if (!config.supabaseAnonKey || config.supabaseAnonKey.includes('...')) {
+    if (!config.supabaseAnonKey || config.supabaseAnonKey.includes('...') || config.supabaseAnonKey.startsWith('sb_secret_')) {
       config.supabaseAnonKey = envKey;
-      changed = true;
+      if (!isFreshReset) changed = true;
     }
 
     if (changed) {
@@ -237,7 +266,7 @@ class StorageService {
         return [];
       }
     }
-    if (localStorage.getItem(STORAGE_KEYS.INITIALIZED) === 'true') {
+    if (this.isCleanOrReset()) {
       return [];
     }
     this.set(STORAGE_KEYS.PRODUCTS, INITIAL_PRODUCTS);
@@ -321,7 +350,7 @@ class StorageService {
         return [];
       }
     }
-    if (localStorage.getItem(STORAGE_KEYS.INITIALIZED) === 'true') {
+    if (this.isCleanOrReset()) {
       return [];
     }
     const deletedIds = new Set(this.getDeletedCustomerIds());
@@ -428,7 +457,7 @@ class StorageService {
         return [];
       }
     }
-    if (localStorage.getItem(STORAGE_KEYS.INITIALIZED) === 'true') {
+    if (this.isCleanOrReset()) {
       return [];
     }
     this.set(STORAGE_KEYS.SALES, INITIAL_SALES);
@@ -615,7 +644,7 @@ class StorageService {
         return [];
       }
     }
-    if (localStorage.getItem(STORAGE_KEYS.INITIALIZED) === 'true') {
+    if (this.isCleanOrReset()) {
       return [];
     }
     this.set(STORAGE_KEYS.EXPENSES, INITIAL_EXPENSES);
@@ -881,6 +910,7 @@ class StorageService {
     this.set(STORAGE_KEYS.PAYMENTS, [], false);
     this.set(STORAGE_KEYS.USERS, [], false);
     this.setCurrentUser(null);
+    localStorage.removeItem(STORAGE_KEYS.CONFIG);
     localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
     try {
       sessionStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
@@ -890,6 +920,10 @@ class StorageService {
     localStorage.removeItem(STORAGE_KEYS.WELCOMED_USER_IDS);
     localStorage.removeItem('sappy_reorder_threshold_mode');
     localStorage.removeItem('sappy_reorder_threshold_val');
+    localStorage.removeItem('sappy_invoice_qr_mode');
+    localStorage.removeItem('sappy_preferred_camera_id');
+    localStorage.removeItem('sappy_pos_sound_muted');
+    localStorage.removeItem('sappy_pos_last_reset_ack');
     if (notify) {
       this.notifyChange();
     }
@@ -911,7 +945,7 @@ class StorageService {
             return [];
           }
           // Filter out the three unknown mock users: Abebe, Bethelhem, and Dawit
-          let filtered = parsed.filter((u) => {
+          const filtered = parsed.filter((u) => {
             const email = (u?.email || '').toLowerCase().trim();
             return (
               email !== 'owner@sappystationery.et' &&
@@ -919,18 +953,6 @@ class StorageService {
               email !== 'manager@sappystationery.et'
             );
           });
-
-          // Ensure default owners are maintained only if accounts already exist and store is not reset
-          if (filtered.length > 0 && localStorage.getItem(STORAGE_KEYS.INITIALIZED) !== 'true') {
-            const hasAmanuel = filtered.some((u) => u.email.toLowerCase() === 'amanuealhailu007@gmail.com');
-            if (!hasAmanuel && DEFAULT_INITIAL_USERS[0]) {
-              filtered = [DEFAULT_INITIAL_USERS[0], ...filtered];
-            }
-            const hasYohannes = filtered.some((u) => u.email.toLowerCase() === 'yohannesleulseged802@gmail.com');
-            if (!hasYohannes && DEFAULT_INITIAL_USERS[1]) {
-              filtered = [...filtered, DEFAULT_INITIAL_USERS[1]];
-            }
-          }
 
           if (filtered.length !== parsed.length) {
             this.set(STORAGE_KEYS.USERS, filtered, false);
@@ -941,8 +963,8 @@ class StorageService {
         return [];
       }
     }
-    // If store has been initialized (e.g. wiped clean by Reset Everything), keep empty clean slate
-    if (localStorage.getItem(STORAGE_KEYS.INITIALIZED) === 'true') {
+    // If store has been initialized or reset, keep empty clean slate — NEVER resurrect default owners
+    if (this.isCleanOrReset()) {
       return [];
     }
     this.set(STORAGE_KEYS.USERS, DEFAULT_INITIAL_USERS, false);
@@ -1388,17 +1410,7 @@ class StorageService {
       }
     }
 
-    // 3. Ensure default initial owners are preserved ONLY IF database is not in clean reset state
-    if (localStorage.getItem(STORAGE_KEYS.INITIALIZED) !== 'true' && userMap.size > 0) {
-      for (const def of DEFAULT_INITIAL_USERS) {
-        const defKey = getKey(def);
-        if (!userMap.has(defKey) && !deletedIds.has(def.id)) {
-          userMap.set(defKey, def);
-        }
-      }
-    }
-
-    // 4. Purge mock demo accounts
+    // 3. Purge mock demo accounts without ever resurrecting default owners after sync/reset
     return Array.from(userMap.values()).filter((u) => {
       const email = (u?.email || '').toLowerCase().trim();
       return (
@@ -1570,11 +1582,13 @@ class StorageService {
       sales?: Sale[];
       expenses?: Expense[];
       creditPayments?: CreditPayment[];
-      config?: StoreConfig;
+      config?: StoreConfig | null;
       users?: AppUser[];
       deletedUserIds?: string[];
       deletedCustomerIds?: string[];
       isReset?: boolean;
+      initialized?: boolean;
+      resetEpoch?: number;
     },
     minLocalTimeMs = 0
   ): void {
@@ -1582,6 +1596,20 @@ class StorageService {
       this.resetEverything(false);
       return;
     }
+
+    // Mark local store initialized BEFORE reading getters so a fresh browser tab
+    // never seeds DEFAULT_INITIAL_USERS or INITIAL_PRODUCTS prior to merging server state.
+    if (
+      state.initialized ||
+      (state.resetEpoch && state.resetEpoch > 0) ||
+      Array.isArray(state.users) ||
+      Array.isArray(state.products)
+    ) {
+      try {
+        localStorage.setItem(STORAGE_KEYS.INITIALIZED, 'true');
+      } catch {}
+    }
+
     const parseTime = (iso?: string) => {
       if (!iso) return 0;
       const t = new Date(iso).getTime();
@@ -1644,7 +1672,11 @@ class StorageService {
       }
       this.set(STORAGE_KEYS.PAYMENTS, Array.from(payMap.values()), false);
     }
-    if (state.config && typeof state.config === 'object') {
+    if (state.config === null) {
+      try {
+        localStorage.removeItem(STORAGE_KEYS.CONFIG);
+      } catch {}
+    } else if (state.config && typeof state.config === 'object') {
       const currentConfig = this.getStoreConfig();
       const mergedConfig: StoreConfig = {
         ...INITIAL_STORE_CONFIG,
@@ -1653,7 +1685,7 @@ class StorageService {
         storeName: state.config.storeName || currentConfig.storeName || INITIAL_STORE_CONFIG.storeName,
         currencySymbol: state.config.currencySymbol || currentConfig.currencySymbol || INITIAL_STORE_CONFIG.currencySymbol,
         currencyCode: state.config.currencyCode || currentConfig.currencyCode || INITIAL_STORE_CONFIG.currencyCode,
-        taxId: state.config.taxId || currentConfig.taxId || INITIAL_STORE_CONFIG.taxId,
+        taxId: state.config.taxId ?? currentConfig.taxId ?? INITIAL_STORE_CONFIG.taxId,
         defaultTaxRate: state.config.defaultTaxRate ?? currentConfig.defaultTaxRate ?? INITIAL_STORE_CONFIG.defaultTaxRate,
         masterPasscode: state.config.masterPasscode || currentConfig.masterPasscode || DEFAULT_MASTER_PASSCODE,
       };
@@ -1674,9 +1706,14 @@ class StorageService {
       }
     }
     if (state.users && Array.isArray(state.users)) {
-      const localUsers = this.getUsers();
-      const merged = this.mergeUserArrays(localUsers, state.users);
-      this.set(STORAGE_KEYS.USERS, merged, false);
+      if (state.users.length === 0 && minLocalTimeMs === 0) {
+        this.set(STORAGE_KEYS.USERS, [], false);
+        this.setCurrentUser(null);
+      } else {
+        const localUsers = this.getUsers();
+        const merged = this.mergeUserArrays(localUsers, state.users);
+        this.set(STORAGE_KEYS.USERS, merged, false);
+      }
     }
   }
 }

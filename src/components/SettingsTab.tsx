@@ -76,6 +76,10 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const [formData, setFormData] = useState<StoreConfig>({ ...config });
   const [savedSuccess, setSavedSuccess] = useState(false);
 
+  useEffect(() => {
+    setFormData({ ...config });
+  }, [config]);
+
   // Yearly Reset State
   const currentYear = new Date().getFullYear();
   const [selectedYear, setSelectedYear] = useState<number>(currentYear);
@@ -205,9 +209,9 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         setIsResettingAll(true);
         try {
           await crossDeviceSyncService.resetAllDevices();
-          onDataReset();
           setShowResetAllModal(false);
           setResetAllConfirmText('');
+          onDataReset();
         } finally {
           setIsResettingAll(false);
         }

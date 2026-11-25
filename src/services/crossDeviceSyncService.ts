@@ -1,5 +1,5 @@
 import { storageService } from './storageService.ts';
-import { getSupabase, isSupabaseConfigured } from '../lib/supabase.ts';
+import { getSupabase, getSupabaseCredentials, isSupabaseConfigured } from '../lib/supabase.ts';
 import { Sale, CreditPayment, Expense } from '../types/pos.ts';
 
 export type SyncStatusType = 'synced' | 'syncing' | 'offline' | 'error';
@@ -108,6 +108,11 @@ class CrossDeviceSyncService {
               this.syncQueued = false;
               this.queuedIsNewSetup = false;
               storageService.resetEverything(false);
+              this.updateState({
+                status: 'synced',
+                lastSyncedAt: new Date().toISOString(),
+                message: 'Factory reset synchronized',
+              });
               if (this.onDataChangedCallback) {
                 this.onDataChangedCallback();
               }
@@ -133,6 +138,30 @@ class CrossDeviceSyncService {
           // Ignore BroadcastChannel errors in restricted contexts
         }
       }
+
+      // Cross-tab fallback via native storage event (catches reset epoch changes reliably across all tabs)
+      window.addEventListener('storage', (e: StorageEvent) => {
+        if (e.key === RESET_EPOCH_STORAGE_KEY && e.newValue) {
+          const nextEpoch = Number(e.newValue);
+          if (Number.isFinite(nextEpoch) && nextEpoch > 0) {
+            if (this.actionDebounceTimer) {
+              clearTimeout(this.actionDebounceTimer);
+              this.actionDebounceTimer = null;
+            }
+            this.syncQueued = false;
+            this.queuedIsNewSetup = false;
+            storageService.resetEverything(false);
+            this.updateState({
+              status: 'synced',
+              lastSyncedAt: new Date().toISOString(),
+              message: 'Factory reset synchronized',
+            });
+            if (this.onDataChangedCallback) {
+              this.onDataChangedCallback();
+            }
+          }
+        }
+      });
     }
   }
 
@@ -358,10 +387,6 @@ class CrossDeviceSyncService {
         urlsToTry.push(backend.endsWith('/') ? `${backend}api/pos/state` : `${backend}/api/pos/state`);
       } else {
         urlsToTry.push('/api/pos/state');
-        const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
-        if (currentOrigin !== DEFAULT_CLOUD_BACKEND_URL) {
-          urlsToTry.push(`${DEFAULT_CLOUD_BACKEND_URL}/api/pos/state`);
-        }
       }
 
       for (const targetUrl of urlsToTry) {
@@ -393,6 +418,7 @@ class CrossDeviceSyncService {
               if (result.state.isReset) {
                 if (serverResetEpoch > 0) this.setClientResetEpoch(serverResetEpoch);
                 storageService.resetEverything(false);
+                this.broadcastForceReset(serverResetEpoch || this.getClientResetEpoch());
               } else if (serverResetEpoch > 0 && localResetEpoch < serverResetEpoch) {
                 storageService.resetEverything(false);
                 this.setClientResetEpoch(serverResetEpoch);
@@ -433,11 +459,85 @@ class CrossDeviceSyncService {
     return this.initialSyncPromise;
   }
 
+  private realtimeChannel: any = null;
+
+  private async ensureRealtimeResetListener(): Promise<void> {
+    if (typeof window === 'undefined' || this.realtimeChannel || !isSupabaseConfigured()) return;
+    try {
+      const client = await getSupabase();
+      if (!client || this.realtimeChannel) return;
+
+      const handleIncomingRemoteReset = (incomingEpochRaw?: any, resetAt?: string, statusRaw?: string) => {
+        if (this.isResetting) return;
+        const tombEpoch = Number(incomingEpochRaw || 0);
+        const tombStatus = String(statusRaw || 'awaiting_setup');
+        const localEpoch = this.getClientResetEpoch();
+        if (tombEpoch <= 0 || tombEpoch <= localEpoch) return;
+
+        if (this.actionDebounceTimer) {
+          clearTimeout(this.actionDebounceTimer);
+          this.actionDebounceTimer = null;
+        }
+        this.syncQueued = false;
+        this.queuedIsNewSetup = false;
+        this.setClientResetEpoch(tombEpoch);
+        storageService.resetEverything(false);
+        if (resetAt) {
+          try {
+            localStorage.setItem('sappy_pos_last_reset_ack', resetAt);
+          } catch {}
+        }
+        this.broadcastForceReset(tombEpoch);
+        this.updateState({
+          status: 'synced',
+          mode: 'supabase',
+          lastSyncedAt: new Date().toISOString(),
+          message: 'Factory reset synchronized from another device',
+          serverVersion: this.syncState.serverVersion + 1,
+        });
+        if (this.onDataChangedCallback) {
+          this.onDataChangedCallback();
+        }
+        if (tombStatus === 'setup_completed') {
+          void this.syncNow();
+        }
+      };
+
+      this.realtimeChannel = client
+        .channel('sappy-pos-system-control')
+        .on('broadcast', { event: 'force_reset' }, (msg: any) => {
+          const p = msg?.payload || {};
+          handleIncomingRemoteReset(p.resetEpoch, p.resetAt, p.status || 'awaiting_setup');
+        })
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'customers',
+            filter: 'id=eq.__system_reset_tombstone__',
+          },
+          (payload: any) => {
+            const notes = payload?.new?.notes;
+            if (!notes) return;
+            try {
+              const parsed = JSON.parse(notes);
+              handleIncomingRemoteReset(parsed.resetEpoch, parsed.resetAt, parsed.status);
+            } catch {}
+          }
+        )
+        .subscribe();
+    } catch {
+      // Realtime optional fallback; polling & tombstone still guarantee eventual reset
+    }
+  }
+
   /**
-   * Initializes background polling (when in Live Sync mode) and binds data refresh handler.
+   * Initializes background polling (when in Live Sync mode), real-time reset listener, and binds data refresh handler.
    */
   public init(onDataChanged: () => void) {
     this.onDataChangedCallback = onDataChanged;
+    void this.ensureRealtimeResetListener();
     if (this.autoSyncMode === 'live') {
       this.startSyncTimer(15000);
     } else {
@@ -509,10 +609,6 @@ class CrossDeviceSyncService {
       postUrlsToTry.push(customUrl.endsWith('/') ? `${customUrl}api/pos/sync` : `${customUrl}/api/pos/sync`);
     } else {
       postUrlsToTry.push('/api/pos/sync');
-      const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
-      if (currentOrigin !== DEFAULT_CLOUD_BACKEND_URL) {
-        postUrlsToTry.push(`${DEFAULT_CLOUD_BACKEND_URL}/api/pos/sync`);
-      }
     }
 
     const localData = storageService.getAllData();
@@ -552,6 +648,7 @@ class CrossDeviceSyncService {
             if (result.wasReset || result.state.isReset) {
               if (serverResetEpoch > 0) this.setClientResetEpoch(serverResetEpoch);
               storageService.resetEverything(false);
+              this.broadcastForceReset(serverResetEpoch || this.getClientResetEpoch());
             } else if (
               result.replaceLocal ||
               (serverResetEpoch > 0 && clientResetEpoch < serverResetEpoch)
@@ -574,6 +671,18 @@ class CrossDeviceSyncService {
                   : 'Server synced (Express Cloud)',
               serverVersion: result.version || this.syncState.serverVersion + 1,
             });
+
+            if (options?.isNewSetup && isSupabaseConfigured()) {
+              void getSupabase()
+                .then((supa) => {
+                  if (!supa) return;
+                  return supa
+                    .from('customers')
+                    .delete()
+                    .eq('id', '__system_staff_registry__');
+                })
+                .catch(() => {});
+            }
 
             if (this.onDataChangedCallback) {
               this.onDataChangedCallback();
@@ -598,32 +707,52 @@ class CrossDeviceSyncService {
       if (client) {
         try {
           let hasRlsError = false;
+          let preservedTombstoneNotes: { resetAt: string; resetEpoch: number } | null = null;
 
-          // 0. Check/Clear Factory Reset Tombstone in Supabase
+          // 0. Check/Update Factory Reset Tombstone in Supabase (never delete so sleeping peers still reset!)
           try {
+            const { data: tombstone } = await client
+              .from('customers')
+              .select('id, notes')
+              .eq('id', '__system_reset_tombstone__')
+              .maybeSingle();
+
+            let tombResetAt = new Date().toISOString();
+            let tombEpoch = 0;
+            let tombStatus = 'awaiting_setup';
+            if (tombstone) {
+              try {
+                const parsed = JSON.parse(tombstone.notes || '{}');
+                if (parsed.resetAt) tombResetAt = parsed.resetAt;
+                if (parsed.resetEpoch) tombEpoch = Number(parsed.resetEpoch) || 0;
+                if (parsed.status) tombStatus = String(parsed.status);
+              } catch {}
+            }
+
             if (options?.isNewSetup) {
-              await client.from('customers').delete().eq('id', '__system_reset_tombstone__');
-            } else {
-              const { data: tombstone } = await client
-                .from('customers')
-                .select('id, notes')
-                .eq('id', '__system_reset_tombstone__')
-                .maybeSingle();
+              const effectiveEpoch = Math.max(tombEpoch, this.getClientResetEpoch());
+              if (tombstone || effectiveEpoch > 0) {
+                preservedTombstoneNotes = {
+                  resetAt: tombResetAt,
+                  resetEpoch: effectiveEpoch || Date.now(),
+                };
+              }
+            } else if (tombstone) {
+              const ackKey = 'sappy_pos_last_reset_ack';
+              const lastAck = typeof window !== 'undefined' ? localStorage.getItem(ackKey) : null;
+              const localEpoch = this.getClientResetEpoch();
+              const isNewerEpoch = tombEpoch > 0 && tombEpoch > localEpoch;
+              const isUnackedAwaiting = tombStatus !== 'setup_completed' && lastAck !== tombResetAt;
 
-              if (tombstone) {
-                let resetAt = 'reset';
-                try {
-                  const parsed = JSON.parse(tombstone.notes || '{}');
-                  if (parsed.resetAt) resetAt = parsed.resetAt;
-                } catch {}
+              if (isNewerEpoch || isUnackedAwaiting) {
+                if (tombEpoch > 0) this.setClientResetEpoch(tombEpoch);
+                storageService.resetEverything(false);
+                if (typeof window !== 'undefined') {
+                  localStorage.setItem(ackKey, tombResetAt);
+                }
+                this.broadcastForceReset(tombEpoch || this.getClientResetEpoch());
 
-                const ackKey = 'sappy_pos_last_reset_ack';
-                const lastAck = typeof window !== 'undefined' ? localStorage.getItem(ackKey) : null;
-                if (lastAck !== resetAt) {
-                  storageService.resetEverything(false);
-                  if (typeof window !== 'undefined') {
-                    localStorage.setItem(ackKey, resetAt);
-                  }
+                if (tombStatus !== 'setup_completed') {
                   this.updateState({
                     status: 'synced',
                     mode: 'supabase',
@@ -634,35 +763,100 @@ class CrossDeviceSyncService {
                   if (this.onDataChangedCallback) {
                     this.onDataChangedCallback();
                   }
-                  this.broadcastLocalChange();
                   return finishSync(true);
                 }
-
-                // Already acknowledged this reset; if store has no users/products yet, skip pushing empty/stale data
-                if (!storageService.hasUsers() && storageService.getProducts().length === 0) {
-                  this.updateState({
-                    status: 'synced',
-                    mode: 'supabase',
-                    lastSyncedAt: new Date().toISOString(),
-                    message: 'Store awaiting initial setup',
-                  });
-                  return finishSync(true);
-                } else {
-                  // User has set up a new store since the reset; clear tombstone
-                  await client.from('customers').delete().eq('id', '__system_reset_tombstone__');
-                }
+                // If setup_completed on peer device: local old data is now wiped clean; continue below to pull new setup!
+              } else if (
+                tombStatus !== 'setup_completed' &&
+                !storageService.hasUsers() &&
+                storageService.getProducts().length === 0
+              ) {
+                // Already acknowledged this reset; skip pushing empty/stale data while awaiting setup
+                this.updateState({
+                  status: 'synced',
+                  mode: 'supabase',
+                  lastSyncedAt: new Date().toISOString(),
+                  message: 'Store awaiting initial setup',
+                });
+                return finishSync(true);
+              } else if (tombStatus !== 'setup_completed' && storageService.hasUsers()) {
+                // Local device set up a new store since the reset; mark tombstone as setup_completed
+                await client.from('customers').upsert({
+                  id: '__system_reset_tombstone__',
+                  name: '__SYSTEM_RESET_TOMBSTONE__',
+                  phone: '+251 00 000 0000',
+                  credit_balance: 0,
+                  credit_limit: 0,
+                  total_purchased: 0,
+                  notes: JSON.stringify({
+                    resetAt: tombResetAt,
+                    resetEpoch: Math.max(tombEpoch, this.getClientResetEpoch()) || Date.now(),
+                    status: 'setup_completed',
+                    setupCompletedAt: new Date().toISOString(),
+                  }),
+                });
               }
             }
           } catch (tombErr) {
             console.warn('Supabase reset tombstone check notice:', tombErr);
           }
 
+          // 0b. When completing First-Time Setup after a reset, ensure remote Supabase tables
+          // are clean BEFORE pushing new data and skip pulling any leftover remote rows.
+          if (options?.isNewSetup) {
+            const resetTablesById = [
+              'sale_items',
+              'credit_payments',
+              'sales',
+              'expenses',
+              'products',
+              'customers',
+              'app_users',
+              'store_users',
+            ];
+            for (const tableName of resetTablesById) {
+              try {
+                await client.from(tableName).delete().not('id', 'is', null);
+                const { data: remaining } = await client.from(tableName).select('id');
+                if (remaining && remaining.length > 0) {
+                  const ids = remaining.map((r: any) => r.id).filter((id: any) => id !== null && id !== undefined);
+                  for (let i = 0; i < ids.length; i += 40) {
+                    await client.from(tableName).delete().in('id', ids.slice(i, i + 40));
+                  }
+                }
+              } catch {}
+            }
+            try {
+              await client.from('store_settings').delete().not('key', 'is', null);
+            } catch {}
+
+            if (preservedTombstoneNotes) {
+              try {
+                await client.from('customers').upsert({
+                  id: '__system_reset_tombstone__',
+                  name: '__SYSTEM_RESET_TOMBSTONE__',
+                  phone: '+251 00 000 0000',
+                  credit_balance: 0,
+                  credit_limit: 0,
+                  total_purchased: 0,
+                  notes: JSON.stringify({
+                    resetAt: preservedTombstoneNotes.resetAt,
+                    resetEpoch: preservedTombstoneNotes.resetEpoch,
+                    status: 'setup_completed',
+                    setupCompletedAt: new Date().toISOString(),
+                  }),
+                });
+              } catch {}
+            }
+          }
+
           // 1. Products Sync (respect updatedAt & syncStartedAt so sales deductions never revert)
           if (this.isResetting) return finishSync(false);
           try {
-            const { data: remoteProducts } = await client.from('products').select('*');
-            if (this.isResetting) return finishSync(false);
-            if (remoteProducts && Array.isArray(remoteProducts) && remoteProducts.length > 0) {
+            if (!options?.isNewSetup) {
+              const { data: remoteProducts } = await client.from('products').select('*');
+              if (this.isResetting) return finishSync(false);
+              if (remoteProducts && Array.isArray(remoteProducts) && remoteProducts.length > 0) {
               const mappedProducts = remoteProducts.map((p: any) => ({
                 id: p.id,
                 sku: p.sku,
@@ -678,6 +872,7 @@ class CrossDeviceSyncService {
                 updatedAt: p.updated_at || undefined,
               }));
               storageService.mergeProductsFromRemote(mappedProducts, syncStartedAt);
+              }
             }
 
             if (this.isResetting) return finishSync(false);
@@ -719,8 +914,9 @@ class CrossDeviceSyncService {
               }
             }
 
-            const { data: remoteCustomers } = await client.from('customers').select('*');
-            if (remoteCustomers && Array.isArray(remoteCustomers) && remoteCustomers.length > 0) {
+            if (!options?.isNewSetup) {
+              const { data: remoteCustomers } = await client.from('customers').select('*');
+              if (remoteCustomers && Array.isArray(remoteCustomers) && remoteCustomers.length > 0) {
               const delSet = new Set(deletedCustIds);
 
               // Check if resilient staff registry record is in customers table
@@ -752,6 +948,7 @@ class CrossDeviceSyncService {
                   updatedAt: c.updated_at || undefined,
                 }));
               storageService.mergeCustomersFromRemote(mappedCustomers, syncStartedAt);
+              }
             }
 
             const currentCustomers = storageService.getCustomers().filter((c) => !c.id.startsWith('__system_'));
@@ -781,44 +978,46 @@ class CrossDeviceSyncService {
 
           // 3. Sales Sync
           try {
-            const { data: remoteSales } = await client.from('sales').select('*');
-            if (remoteSales && Array.isArray(remoteSales) && remoteSales.length > 0) {
-              const mappedSales: Sale[] = remoteSales.map((s: any) => ({
-                id: s.id,
-                invoiceNumber: s.invoice_number,
-                timestamp: s.timestamp || new Date().toISOString(),
-                customerId: s.customer_id || undefined,
-                customerName: s.customer_name,
-                customerPhone: s.customer_phone || undefined,
-                customerEmail: s.customer_email || undefined,
-                customerAddress: s.customer_address || undefined,
-                subtotal: Number(s.subtotal || 0),
-                taxRate: Number(s.tax_rate || 0),
-                taxAmount: Number(s.tax_amount || 0),
-                discountAmount: Number(s.discount_amount || 0),
-                totalAmount: Number(s.total_amount || 0),
-                totalCost: Number(s.total_cost || 0),
-                grossProfit: Number(s.gross_profit || 0),
-                paymentMethod: s.payment_method,
-                amountTendered: Number(s.amount_tendered || 0),
-                changeGiven: Number(s.change_given || 0),
-                isCreditPaid: s.is_credit_paid ?? true,
-                creditDueDate: s.credit_due_date || undefined,
-                paidAmount: Number(s.paid_amount || 0),
-                notes: s.notes || undefined,
-                items: Array.isArray(s.items) ? s.items : [],
-              }));
-              const localSales = storageService.getSales();
-              const salesMap = new Map(localSales.map((s) => [s.id, s]));
-              for (const rs of mappedSales) {
-                const existing = salesMap.get(rs.id);
-                if (existing && existing.isReturned) {
-                  salesMap.set(rs.id, { ...rs, ...existing });
-                } else {
-                  salesMap.set(rs.id, rs);
+            if (!options?.isNewSetup) {
+              const { data: remoteSales } = await client.from('sales').select('*');
+              if (remoteSales && Array.isArray(remoteSales) && remoteSales.length > 0) {
+                const mappedSales: Sale[] = remoteSales.map((s: any) => ({
+                  id: s.id,
+                  invoiceNumber: s.invoice_number,
+                  timestamp: s.timestamp || new Date().toISOString(),
+                  customerId: s.customer_id || undefined,
+                  customerName: s.customer_name,
+                  customerPhone: s.customer_phone || undefined,
+                  customerEmail: s.customer_email || undefined,
+                  customerAddress: s.customer_address || undefined,
+                  subtotal: Number(s.subtotal || 0),
+                  taxRate: Number(s.tax_rate || 0),
+                  taxAmount: Number(s.tax_amount || 0),
+                  discountAmount: Number(s.discount_amount || 0),
+                  totalAmount: Number(s.total_amount || 0),
+                  totalCost: Number(s.total_cost || 0),
+                  grossProfit: Number(s.gross_profit || 0),
+                  paymentMethod: s.payment_method,
+                  amountTendered: Number(s.amount_tendered || 0),
+                  changeGiven: Number(s.change_given || 0),
+                  isCreditPaid: s.is_credit_paid ?? true,
+                  creditDueDate: s.credit_due_date || undefined,
+                  paidAmount: Number(s.paid_amount || 0),
+                  notes: s.notes || undefined,
+                  items: Array.isArray(s.items) ? s.items : [],
+                }));
+                const localSales = storageService.getSales();
+                const salesMap = new Map(localSales.map((s) => [s.id, s]));
+                for (const rs of mappedSales) {
+                  const existing = salesMap.get(rs.id);
+                  if (existing && existing.isReturned) {
+                    salesMap.set(rs.id, { ...rs, ...existing });
+                  } else {
+                    salesMap.set(rs.id, rs);
+                  }
                 }
+                storageService.hydrateFromServer({ sales: Array.from(salesMap.values()) }, syncStartedAt);
               }
-              storageService.hydrateFromServer({ sales: Array.from(salesMap.values()) }, syncStartedAt);
             }
 
             const currentSales = storageService.getSales();
@@ -860,25 +1059,27 @@ class CrossDeviceSyncService {
 
           // 4. Credit Debt Payments Sync
           try {
-            const { data: remotePayments } = await client.from('credit_payments').select('*');
-            if (remotePayments && Array.isArray(remotePayments) && remotePayments.length > 0) {
-              const mappedPayments: CreditPayment[] = remotePayments.map((p: any) => ({
-                id: p.id,
-                customerId: p.customer_id,
-                customerName: p.customer_name,
-                saleId: p.sale_id || undefined,
-                amount: Number(p.amount || 0),
-                paymentMethod: p.payment_method || 'cash',
-                timestamp: p.timestamp || new Date().toISOString(),
-                receiptNumber: p.receipt_number,
-                notes: p.notes || undefined,
-              }));
-              const localPayments = storageService.getCreditPayments();
-              const payMap = new Map(localPayments.map((p) => [p.id, p]));
-              for (const rp of mappedPayments) {
-                payMap.set(rp.id, rp);
+            if (!options?.isNewSetup) {
+              const { data: remotePayments } = await client.from('credit_payments').select('*');
+              if (remotePayments && Array.isArray(remotePayments) && remotePayments.length > 0) {
+                const mappedPayments: CreditPayment[] = remotePayments.map((p: any) => ({
+                  id: p.id,
+                  customerId: p.customer_id,
+                  customerName: p.customer_name,
+                  saleId: p.sale_id || undefined,
+                  amount: Number(p.amount || 0),
+                  paymentMethod: p.payment_method || 'cash',
+                  timestamp: p.timestamp || new Date().toISOString(),
+                  receiptNumber: p.receipt_number,
+                  notes: p.notes || undefined,
+                }));
+                const localPayments = storageService.getCreditPayments();
+                const payMap = new Map(localPayments.map((p) => [p.id, p]));
+                for (const rp of mappedPayments) {
+                  payMap.set(rp.id, rp);
+                }
+                storageService.hydrateFromServer({ creditPayments: Array.from(payMap.values()) });
               }
-              storageService.hydrateFromServer({ creditPayments: Array.from(payMap.values()) });
             }
 
             const currentPayments = storageService.getCreditPayments();
@@ -906,26 +1107,28 @@ class CrossDeviceSyncService {
 
           // 5. Expenses Sync
           try {
-            const { data: remoteExpenses } = await client.from('expenses').select('*');
-            if (remoteExpenses && Array.isArray(remoteExpenses) && remoteExpenses.length > 0) {
-              const mappedExpenses: Expense[] = remoteExpenses.map((e: any) => ({
-                id: e.id,
-                date: e.date,
-                category: e.category,
-                title: e.title,
-                amount: Number(e.amount || 0),
-                paymentMethod: e.payment_method || 'cash',
-                payee: e.payee,
-                receiptNumber: e.receipt_number || undefined,
-                notes: e.notes || undefined,
-                createdAt: e.created_at || new Date().toISOString(),
-              }));
-              const localExpenses = storageService.getExpenses();
-              const expMap = new Map(localExpenses.map((e) => [e.id, e]));
-              for (const re of mappedExpenses) {
-                expMap.set(re.id, re);
+            if (!options?.isNewSetup) {
+              const { data: remoteExpenses } = await client.from('expenses').select('*');
+              if (remoteExpenses && Array.isArray(remoteExpenses) && remoteExpenses.length > 0) {
+                const mappedExpenses: Expense[] = remoteExpenses.map((e: any) => ({
+                  id: e.id,
+                  date: e.date,
+                  category: e.category,
+                  title: e.title,
+                  amount: Number(e.amount || 0),
+                  paymentMethod: e.payment_method || 'cash',
+                  payee: e.payee,
+                  receiptNumber: e.receipt_number || undefined,
+                  notes: e.notes || undefined,
+                  createdAt: e.created_at || new Date().toISOString(),
+                }));
+                const localExpenses = storageService.getExpenses();
+                const expMap = new Map(localExpenses.map((e) => [e.id, e]));
+                for (const re of mappedExpenses) {
+                  expMap.set(re.id, re);
+                }
+                storageService.hydrateFromServer({ expenses: Array.from(expMap.values()) });
               }
-              storageService.hydrateFromServer({ expenses: Array.from(expMap.values()) });
             }
 
             const currentExpenses = storageService.getExpenses();
@@ -979,30 +1182,30 @@ class CrossDeviceSyncService {
               }
             } catch {}
 
-            // Strategy B: If table not yet created, fetch from resilient staff registry record in Supabase
-            if (!tableSyncSucceeded) {
-              try {
-                const { data: regData } = await client
-                  .from('customers')
-                  .select('notes')
-                  .eq('id', '__system_staff_registry__')
-                  .maybeSingle();
+              // Strategy B: If table not yet created, fetch from resilient staff registry record in Supabase
+              if (!tableSyncSucceeded && !options?.isNewSetup) {
+                try {
+                  const { data: regData } = await client
+                    .from('customers')
+                    .select('notes')
+                    .eq('id', '__system_staff_registry__')
+                    .maybeSingle();
 
-                if (regData && regData.notes) {
-                  const parsed = JSON.parse(regData.notes);
-                  if (Array.isArray(parsed) && parsed.length > 0) {
-                    remoteUsersFound = parsed;
+                  if (regData && regData.notes) {
+                    const parsed = JSON.parse(regData.notes);
+                    if (Array.isArray(parsed) && parsed.length > 0) {
+                      remoteUsersFound = parsed;
+                    }
                   }
+                } catch (regFetchErr) {
+                  console.warn('System staff registry fetch notice:', regFetchErr);
                 }
-              } catch (regFetchErr) {
-                console.warn('System staff registry fetch notice:', regFetchErr);
               }
-            }
 
-            // Hydrate and merge remote users with local users
-            if (remoteUsersFound.length > 0) {
-              storageService.hydrateFromServer({ users: remoteUsersFound });
-            }
+              // Hydrate and merge remote users with local users (never pull old users during new setup)
+              if (!options?.isNewSetup && remoteUsersFound.length > 0) {
+                storageService.hydrateFromServer({ users: remoteUsersFound });
+              }
 
             // Push current local users to Supabase so both devices have identical staff list
             const currentUsers = storageService.getUsers();
@@ -1118,25 +1321,30 @@ class CrossDeviceSyncService {
         ]);
       }
 
-      // 3. Wipe remote Express backend stores with strict timeouts
+      // 3. Wipe remote Express backend stores (passes Supabase creds and waits up to 15s for full cloud wipe)
       const resetUrlsToTry: string[] = [];
       const customUrl = this.getBackendUrl();
       if (customUrl) {
         resetUrlsToTry.push(customUrl.endsWith('/') ? `${customUrl}api/pos/reset` : `${customUrl}/api/pos/reset`);
       } else {
         resetUrlsToTry.push('/api/pos/reset');
-        const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
-        if (currentOrigin !== DEFAULT_CLOUD_BACKEND_URL) {
-          resetUrlsToTry.push(`${DEFAULT_CLOUD_BACKEND_URL}/api/pos/reset`);
-        }
       }
 
+      const supaCreds = getSupabaseCredentials();
       await Promise.allSettled(
         resetUrlsToTry.map(async (targetUrl) => {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 3500);
+          const timeoutId = setTimeout(() => controller.abort(), 15000);
           try {
-            const resp = await fetch(targetUrl, { method: 'POST', signal: controller.signal });
+            const resp = await fetch(targetUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                supabaseUrl: supaCreds.url,
+                supabaseAnonKey: supaCreds.anonKey,
+              }),
+              signal: controller.signal,
+            });
             if (resp.ok) {
               const contentType = resp.headers.get('content-type') || '';
               if (contentType.includes('application/json')) {
@@ -1156,15 +1364,15 @@ class CrossDeviceSyncService {
         })
       );
 
-      // 4. Wipe live Supabase tables (if configured) in FK-safe order using type-agnostic filters
+      // 4. Wipe live Supabase tables (if configured) in FK-safe order with verified batch fallback
       if (isSupabaseConfigured()) {
         const client = await getSupabase();
         if (client) {
           try {
             const tablesById = [
               'sale_items',
-              'sales',
               'credit_payments',
+              'sales',
               'expenses',
               'products',
               'customers',
@@ -1173,19 +1381,20 @@ class CrossDeviceSyncService {
             ];
             for (const tableName of tablesById) {
               try {
-                const { error } = await client.from(tableName).delete().not('id', 'is', null);
-                if (error && tableName === 'products') {
-                  // Fallback explicit delete by id list in case PostgREST filter behaved unexpectedly
-                  const { data: remaining } = await client.from('products').select('id');
-                  if (remaining && remaining.length > 0) {
-                    const ids = remaining.map((r: any) => r.id).filter(Boolean);
-                    if (ids.length > 0) {
-                      await client.from('products').delete().in('id', ids);
-                    }
+                await client.from(tableName).delete().not('id', 'is', null);
+                const { data: remaining } = await client.from(tableName).select('id');
+                if (remaining && remaining.length > 0) {
+                  const ids = remaining.map((r: any) => r.id).filter((id: any) => id !== null && id !== undefined);
+                  for (let i = 0; i < ids.length; i += 40) {
+                    await client.from(tableName).delete().in('id', ids.slice(i, i + 40));
                   }
                 }
               } catch {}
             }
+
+            try {
+              await client.from('customers').delete().eq('id', '__system_staff_registry__');
+            } catch {}
 
             try {
               await client.from('store_settings').delete().not('key', 'is', null);
@@ -1201,11 +1410,21 @@ class CrossDeviceSyncService {
                 credit_balance: 0,
                 credit_limit: 0,
                 total_purchased: 0,
-                notes: JSON.stringify({ resetAt, resetEpoch }),
+                notes: JSON.stringify({ resetAt, resetEpoch, status: 'awaiting_setup' }),
               });
               if (typeof window !== 'undefined') {
                 localStorage.setItem('sappy_pos_last_reset_ack', resetAt);
               }
+            } catch {}
+
+            // Broadcast instant force_reset signal to all currently open devices via Supabase Realtime
+            try {
+              const ctrlChannel = this.realtimeChannel || client.channel('sappy-pos-system-control');
+              await ctrlChannel.send({
+                type: 'broadcast',
+                event: 'force_reset',
+                payload: { resetEpoch, resetAt, status: 'awaiting_setup' },
+              });
             } catch {}
           } catch (supaErr) {
             console.warn('Supabase reset warning:', supaErr);

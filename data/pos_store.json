@@ -4057,7 +4057,7 @@
       "creditBalance": 0,
       "creditLimit": 5000,
       "totalPurchased": 2400,
-      "createdAt": "2026-11-11T14:39:37.023395+00:00"
+      "createdAt": "2026-01-01T08:00:00Z"
     },
     {
       "id": "cust-init-002",
@@ -4068,7 +4068,7 @@
       "creditBalance": 0,
       "creditLimit": 10000,
       "totalPurchased": 5800,
-      "createdAt": "2026-11-11T18:32:25.218465+00:00"
+      "createdAt": "2026-01-01T08:00:00Z"
     }
   ],
   "sales": [
@@ -4226,7 +4226,7 @@
     "tagline": "Quality Paper, Pens, Art & Office Essentials",
     "address": "Shop 14, Central Market Plaza, Commercial Avenue",
     "phone": "+251 91 123 4567",
-    "email": "accounts@sappystationary.com",
+    "email": "amanuealhailu007@gmail.com",
     "taxId": "TIN-00982412",
     "currencySymbol": "Br ",
     "currencyCode": "ETB",
@@ -4331,8 +4331,8 @@
       "updatedAt": "2026-11-21T10:03:13.095+00:00"
     }
   ],
-  "lastSyncedAt": "2026-11-23T14:05:13.207Z",
-  "version": 73530,
+  "lastSyncedAt": "2026-11-25T08:41:37.216Z",
+  "version": 73541,
   "isReset": false,
   "initialized": true
 }
