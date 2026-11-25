@@ -17,7 +17,7 @@ export interface SyncState {
 
 type SyncListener = (state: SyncState) => void;
 
-export const DEFAULT_CLOUD_BACKEND_URL = 'https://ais-pre-r3d7544mmard67yh6cqteh-17765999408.europe-west2.run.app';
+export const DEFAULT_CLOUD_BACKEND_URL = '';
 const RESET_EPOCH_STORAGE_KEY = 'sappy_pos_reset_epoch';
 const AUTO_SYNC_MODE_STORAGE_KEY = 'sappy_pos_auto_sync_mode_v1';
 
@@ -311,16 +311,6 @@ class CrossDeviceSyncService {
     const custom = localStorage.getItem('sappy_custom_backend_url');
     if (custom && custom.trim()) {
       return custom.trim();
-    }
-    // If running on GitHub Pages (e.g. nexgriddigital.github.io) or external static host
-    const host = window.location.hostname;
-    if (
-      host.endsWith('github.io') ||
-      host.endsWith('pages.dev') ||
-      host.endsWith('vercel.app') ||
-      host.endsWith('netlify.app')
-    ) {
-      return DEFAULT_CLOUD_BACKEND_URL;
     }
     return '';
   }
