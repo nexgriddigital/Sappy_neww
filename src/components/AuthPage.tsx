@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Mail,
   Lock,
@@ -71,17 +71,26 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // Sync mode whenever initialMode changes or when users become available
+  const prevHadUsersRef = useRef<boolean>(storageService.hasUsers());
+  const prevInitialModeRef = useRef(initialMode);
+
+  // Sync mode only when initialMode prop actually changes after mount
   useEffect(() => {
-    const hasAnyUsers = storageService.hasUsers();
-    setMode(initialMode || (hasAnyUsers ? 'login' : 'setup'));
+    if (prevInitialModeRef.current === initialMode) return;
+    prevInitialModeRef.current = initialMode;
+
     const currentUsers = storageService.getUsers();
+    const hasAnyUsers = currentUsers.length > 0;
+    const hadUsersBefore = prevHadUsersRef.current;
+    prevHadUsersRef.current = hasAnyUsers;
+
+    setMode(initialMode || (hasAnyUsers ? 'login' : 'setup'));
     setStaffUsers(currentUsers);
-    if (currentUsers.length > 0) {
+    if (hasAnyUsers) {
       const ownerUser = currentUsers.find((u) => u.email.toLowerCase() === 'amanuealhailu007@gmail.com') || currentUsers[0];
       setSelectedStaffUser((prev) => prev || ownerUser);
       setEmail((prev) => prev || ownerUser.email);
-    } else {
+    } else if (hadUsersBefore) {
       setSelectedStaffUser(null);
       setEmail('');
       setPassword('');
@@ -90,23 +99,30 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     }
   }, [initialMode]);
 
-  // Listen to cross-device sync and local storage changes, and perform auto-pull on mount
+  // Listen to cross-device sync and local storage changes, without wiping active form inputs
   useEffect(() => {
     const refreshProfiles = () => {
       const users = storageService.getUsers();
+      const hadUsersBefore = prevHadUsersRef.current;
+      const hasUsersNow = users.length > 0;
+      prevHadUsersRef.current = hasUsersNow;
       setStaffUsers(users);
-      if (users.length === 0) {
-        setSelectedStaffUser(null);
-        setEmail('');
-        setPassword('');
-        setConfirmPassword('');
-        setFullName('');
-        setPhone('');
-        setPinCode('');
-        setStoreName('Sappy Stationary');
-        setCurrencySymbol('Br ');
-        setTaxRate('15');
-        setMode('setup');
+
+      if (!hasUsersNow) {
+        // Only clear typed fields if users existed before and were just factory-reset to 0
+        if (hadUsersBefore) {
+          setSelectedStaffUser(null);
+          setEmail('');
+          setPassword('');
+          setConfirmPassword('');
+          setFullName('');
+          setPhone('');
+          setPinCode('');
+          setStoreName('Sappy Stationary');
+          setCurrencySymbol('Br ');
+          setTaxRate('15');
+          setMode('setup');
+        }
       } else {
         setSelectedStaffUser((prev) => {
           if (!prev) {
@@ -489,6 +505,12 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    if (mode === 'login' && selectedStaffUser && email === selectedStaffUser.email && !fullName) {
+                      setEmail('');
+                      setPassword('');
+                      setConfirmPassword('');
+                      setPinCode('');
+                    }
                     setMode('signup');
                     setError(null);
                     setSuccessMsg(null);
@@ -538,6 +560,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   <input
                     type="text"
                     required
+                    autoComplete="name"
                     placeholder="e.g. Store Owner Name"
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
@@ -556,6 +579,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                     <input
                       type="text"
                       required
+                      autoComplete="organization"
                       placeholder="e.g. Sappy Stationary"
                       value={storeName}
                       onChange={(e) => setStoreName(e.target.value)}
@@ -572,6 +596,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                     <Phone className="w-4 h-4 text-charcoal-500 absolute left-3.5 top-3" />
                     <input
                       type="tel"
+                      autoComplete="tel"
                       placeholder="+251 91 123 4567"
                       value={phone}
                       onChange={(e) => setPhone(e.target.value)}
@@ -590,6 +615,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   <input
                     type="email"
                     required
+                    autoComplete="email"
                     placeholder="owner@sappystationery.et"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
@@ -607,6 +633,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                     <input
                       type={showPassword ? 'text' : 'password'}
                       required
+                      autoComplete="new-password"
                       placeholder="Min 6 characters"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
@@ -629,6 +656,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   <input
                     type="password"
                     required
+                    autoComplete="new-password"
                     placeholder="Re-enter password"
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
@@ -644,6 +672,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                 <input
                   type="password"
                   inputMode="numeric"
+                  autoComplete="off"
                   maxLength={4}
                   placeholder="e.g. 2468"
                   value={pinCode}
@@ -908,6 +937,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   <input
                     type="text"
                     required
+                    autoComplete="name"
                     placeholder="Staff Member Name"
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
@@ -925,6 +955,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   <input
                     type="email"
                     required
+                    autoComplete="email"
                     placeholder="staff@sappystationery.et"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
@@ -972,6 +1003,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   <input
                     type="password"
                     required
+                    autoComplete="new-password"
                     placeholder="Min 6 characters"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
@@ -986,6 +1018,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   <input
                     type="password"
                     required
+                    autoComplete="new-password"
                     placeholder="Re-enter password"
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
@@ -1001,6 +1034,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                 <input
                   type="password"
                   inputMode="numeric"
+                  autoComplete="off"
                   maxLength={4}
                   placeholder="4-digit numeric PIN for fast register sign-in"
                   value={pinCode}
