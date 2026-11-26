@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, memo } from 'react';
 import {
   LayoutDashboard,
   Store,
@@ -22,10 +22,9 @@ import {
   Minimize2,
   Menu,
   X,
-  ChevronRight,
-  Smartphone,
   KeyRound,
   Activity,
+  Smartphone,
 } from 'lucide-react';
 import { AppUser } from '../types/pos.ts';
 import { SappyLogo } from './SappyLogo.tsx';
@@ -48,6 +47,7 @@ export type TabType =
 interface NavbarProps {
   activeTab: TabType;
   onTabChange: (tab: TabType) => void;
+  onPreloadTab?: (tab: TabType) => void;
   cartItemCount: number;
   currentUser: AppUser | null;
   onSignOut: () => void;
@@ -64,9 +64,34 @@ interface NavbarProps {
   onOpenChangeCredentials?: () => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({
+const NAV_ITEMS: { id: TabType; label: string; shortLabel?: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'register', label: 'POS Register', shortLabel: 'POS Register', icon: Store },
+  { id: 'sales', label: 'Sales Ledger', shortLabel: 'Sales Ledger', icon: FileText },
+  { id: 'activity', label: 'Activity', icon: Activity },
+  { id: 'credit', label: 'Credit & Debt', icon: Users },
+  { id: 'inventory', label: 'Inventory', icon: Boxes },
+  { id: 'expenses', label: 'Expenses', icon: Wallet },
+  { id: 'reports', label: 'General Reports', shortLabel: 'Reports', icon: BarChart3 },
+  { id: 'qrstudio', label: 'QR & Barcode', icon: QrCode },
+  { id: 'users', label: 'Users & Staff', icon: UserCog },
+  { id: 'sync', label: 'Cloud Sync', icon: Database },
+  { id: 'settings', label: 'Settings', icon: Settings },
+];
+
+const MOBILE_PRIMARY_TABS: { id: TabType; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  { id: 'register', label: 'Register', icon: Store },
+  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'inventory', label: 'Inventory', icon: Boxes },
+  { id: 'sales', label: 'Sales', icon: FileText },
+];
+
+const PRIMARY_MOBILE_TAB_IDS = new Set<TabType>(['register', 'dashboard', 'inventory', 'sales']);
+
+const NavbarComponent: React.FC<NavbarProps> = ({
   activeTab,
   onTabChange,
+  onPreloadTab,
   cartItemCount,
   currentUser,
   onSignOut,
@@ -84,68 +109,68 @@ export const Navbar: React.FC<NavbarProps> = ({
 }) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-  const navItems: { id: TabType; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'register', label: 'POS Register', icon: Store },
-    { id: 'sales', label: 'Sales Ledger', icon: FileText },
-    { id: 'activity', label: 'Activity', icon: Activity },
-    { id: 'credit', label: 'Credit & Debt', icon: Users },
-    { id: 'inventory', label: 'Inventory', icon: Boxes },
-    { id: 'expenses', label: 'Expenses', icon: Wallet },
-    { id: 'reports', label: 'General Reports', icon: BarChart3 },
-    { id: 'qrstudio', label: 'QR & Barcode', icon: QrCode },
-    { id: 'users', label: 'Users & Staff', icon: UserCog },
-    { id: 'sync', label: 'Cloud Sync', icon: Database },
-    { id: 'settings', label: 'Settings', icon: Settings },
-  ];
-
-  // Mobile Bottom Bar Primary Tabs
-  const mobilePrimaryTabs: { id: TabType; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-    { id: 'register', label: 'Register', icon: Store },
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'inventory', label: 'Inventory', icon: Boxes },
-    { id: 'sales', label: 'Sales', icon: FileText },
-    { id: 'activity', label: 'Activity', icon: Activity },
-  ];
+  useEffect(() => {
+    if (!isMobileMenuOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsMobileMenuOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isMobileMenuOpen]);
 
   const handleSelectTab = (tab: TabType) => {
     onTabChange(tab);
     setIsMobileMenuOpen(false);
   };
 
-  const isSecondaryTabActive = !['register', 'dashboard', 'inventory', 'sales', 'activity'].includes(activeTab);
+  const handleWarmTab = (tab: TabType) => {
+    if (onPreloadTab) {
+      onPreloadTab(tab);
+    }
+  };
+
+  const isSecondaryTabActive = !PRIMARY_MOBILE_TAB_IDS.has(activeTab);
 
   return (
     <>
-      <header className="no-print bg-charcoal-900 border-b border-charcoal-800 sticky top-0 z-40 shadow-xl">
+      <header className="no-print bg-charcoal-900 border-b border-charcoal-800 sticky top-0 z-40 shadow-lg">
         {/* ========================================================================= */}
         {/* ROW 1: BRAND LOGO & SYSTEM CONTROLS / UTILITIES */}
         {/* ========================================================================= */}
-        <div className="border-b border-charcoal-800/80 bg-charcoal-900/95 backdrop-blur-md">
-          <div className="max-w-7xl mx-auto px-3 sm:px-6 h-13 sm:h-14 flex items-center justify-between gap-3">
+        <div className="md:border-b border-charcoal-800/80 bg-charcoal-900">
+          <div className="max-w-7xl mx-auto px-2.5 sm:px-6 h-12 sm:h-14 flex items-center justify-between gap-2 sm:gap-3">
             
             {/* Left: Brand Identity & Quick Global Search */}
-            <div className="flex items-center gap-3 sm:gap-4 shrink-0">
+            <div className="flex items-center gap-2 sm:gap-4 min-w-0">
               <button
+                type="button"
+                onPointerDown={() => handleWarmTab('dashboard')}
                 onClick={() => handleSelectTab('dashboard')}
-                className="flex items-center gap-2 text-left cursor-pointer group shrink-0 active:scale-95 transition-transform"
+                className="flex items-center gap-2 text-left cursor-pointer shrink-0 active:scale-95 transition-transform touch-manipulation"
                 aria-label="SAPPY Dashboard"
               >
-                <SappyLogo variant="wordmark" size="md" showSubtitle={true} />
+                <span className="sm:hidden">
+                  <SappyLogo variant="wordmark" size="sm" showSubtitle={false} />
+                </span>
+                <span className="hidden sm:inline-flex">
+                  <SappyLogo variant="wordmark" size="md" showSubtitle={true} />
+                </span>
               </button>
 
               <div className="h-5 w-px bg-charcoal-800 hidden sm:block" />
 
-              {/* Global Search / Command Palette shortcut */}
+              {/* Desktop Global Search / Command Palette shortcut */}
               {onOpenCommandPalette && (
                 <button
                   type="button"
                   onClick={onOpenCommandPalette}
-                  className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-charcoal-950/90 hover:bg-charcoal-800 text-charcoal-400 hover:text-white border border-charcoal-800/90 transition-all cursor-pointer text-xs group shadow-inner"
+                  className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-charcoal-950/90 hover:bg-charcoal-800 text-charcoal-400 hover:text-white border border-charcoal-800/90 transition-colors cursor-pointer text-xs group shadow-inner"
                   title="Global Search & Quick Actions (Ctrl+K or /)"
                   aria-label="Open command palette"
                 >
-                  <Search className="w-3.5 h-3.5 text-forest-400 group-hover:scale-110 transition-transform" />
+                  <Search className="w-3.5 h-3.5 text-forest-400" />
                   <span className="text-[12px] text-charcoal-300 font-sans">Quick search or jump to...</span>
                   <kbd className="ml-1.5 px-1.5 py-0.2 rounded bg-charcoal-900 text-[10px] font-mono text-charcoal-400 border border-charcoal-800">
                     ⌘K
@@ -154,9 +179,20 @@ export const Navbar: React.FC<NavbarProps> = ({
               )}
             </div>
 
-            {/* Right: Cloud Sync Status, System Toggles, POS Register Quick Cart & Staff Account */}
+            {/* Right: Mobile Search, Cloud Sync Status, System Toggles, POS Cart & Menu */}
             <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
-              
+              {/* Mobile Quick Search Icon */}
+              {onOpenCommandPalette && (
+                <button
+                  type="button"
+                  onClick={onOpenCommandPalette}
+                  className="sm:hidden p-1.5 rounded-lg bg-charcoal-950 hover:bg-charcoal-800 text-charcoal-300 border border-charcoal-800 cursor-pointer active:scale-95 touch-manipulation"
+                  aria-label="Search catalog and actions"
+                >
+                  <Search className="w-4 h-4 text-forest-400" />
+                </button>
+              )}
+
               {/* Customer Facing Screen Trigger */}
               {onOpenCustomerDisplay && (
                 <button
@@ -221,27 +257,30 @@ export const Navbar: React.FC<NavbarProps> = ({
                 />
               </div>
 
-              {/* Quick POS Register Cart Pill */}
+              {/* Quick POS Register Cart Button */}
               <button
-                onClick={() => onTabChange('register')}
-                className="px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-xl bg-forest-700 text-white hover:bg-forest-600 transition-colors cursor-pointer flex items-center gap-1.5 active:scale-95 border border-forest-500/80 shadow-md shadow-forest-950/40 shrink-0"
+                type="button"
+                onPointerDown={() => handleWarmTab('register')}
+                onClick={() => handleSelectTab('register')}
+                className="px-2 py-1.5 sm:px-3 sm:py-2 rounded-lg sm:rounded-xl bg-forest-700 text-white hover:bg-forest-600 transition-colors cursor-pointer flex items-center gap-1.5 active:scale-95 border border-forest-500/80 shadow-sm shrink-0 touch-manipulation"
                 aria-label="Open POS Register"
               >
                 <ShoppingCart className="w-4 h-4 text-forest-200" />
                 <span className="hidden sm:inline text-xs font-bold">POS</span>
                 {cartItemCount > 0 && (
-                  <span className="inline-flex items-center justify-center min-w-[18px] h-4.5 px-1 bg-amber-400 text-charcoal-950 text-[10px] font-mono font-black rounded-full shadow-xs">
+                  <span className="inline-flex items-center justify-center min-w-[18px] h-4 px-1 bg-amber-400 text-charcoal-950 text-[10px] font-mono font-black rounded-full">
                     {cartItemCount}
                   </span>
                 )}
               </button>
 
-              {/* Staff User Profile Badge / Sign Out */}
+              {/* Staff User Profile Badge / Sign Out (Desktop/Tablet) */}
               {currentUser ? (
                 <div className="hidden sm:flex items-center gap-1.5 bg-charcoal-950/90 p-1 pl-2 rounded-xl border border-charcoal-800 shrink-0">
                   <button
                     type="button"
-                    onClick={() => onTabChange('users')}
+                    onPointerDown={() => handleWarmTab('users')}
+                    onClick={() => handleSelectTab('users')}
                     className="flex items-center gap-1.5 text-left cursor-pointer group hover:opacity-90"
                     title={`Signed in as ${currentUser.fullName} (${currentUser.role}). Click to manage staff accounts.`}
                   >
@@ -272,6 +311,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   )}
 
                   <button
+                    type="button"
                     onClick={onSignOut}
                     className="p-1.5 text-charcoal-400 hover:text-rose-400 hover:bg-charcoal-800 rounded-lg transition-colors cursor-pointer"
                     title={`Signed in as ${currentUser.fullName} (${currentUser.role}). Click to switch user or sign out.`}
@@ -282,6 +322,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </div>
               ) : (
                 <button
+                  type="button"
                   onClick={onOpenAuth}
                   className="hidden sm:flex px-3 py-1.5 rounded-xl bg-charcoal-800 hover:bg-charcoal-700 text-charcoal-200 hover:text-white text-xs font-bold transition-colors cursor-pointer items-center gap-1.5 border border-charcoal-700 active:scale-95"
                 >
@@ -294,7 +335,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               <button
                 type="button"
                 onClick={() => setIsMobileMenuOpen(true)}
-                className="md:hidden p-2 rounded-xl bg-charcoal-950 hover:bg-charcoal-800 text-charcoal-200 hover:text-white border border-charcoal-800 transition-colors cursor-pointer active:scale-95"
+                className="md:hidden p-1.5 rounded-lg bg-charcoal-950 hover:bg-charcoal-800 text-charcoal-200 hover:text-white border border-charcoal-800 transition-colors cursor-pointer active:scale-95 touch-manipulation"
                 aria-label="Open mobile menu"
               >
                 <Menu className="w-5 h-5 text-forest-400" />
@@ -304,15 +345,15 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
 
         {/* ========================================================================= */}
-        {/* ROW 2: PRIMARY MODULE NAVIGATION TABS BAR (With Full Labels & Icons) */}
+        {/* ROW 2: DESKTOP & TABLET PRIMARY MODULE NAVIGATION BAR (Hidden on mobile) */}
         {/* ========================================================================= */}
-        <div className="bg-charcoal-950/95 backdrop-blur-md">
-          <div className="max-w-[1400px] mx-auto px-2 sm:px-4">
+        <div className="hidden md:block bg-charcoal-950">
+          <div className="max-w-[1400px] mx-auto px-3 sm:px-4">
             <nav
               aria-label="Primary modules"
-              className="flex flex-wrap items-center gap-1 py-1.5"
+              className="flex items-center gap-1 py-1.5 overflow-x-auto no-scrollbar xl:flex-wrap"
             >
-              {navItems.map((item) => {
+              {NAV_ITEMS.map((item) => {
                 const Icon = item.icon;
                 const isActive = activeTab === item.id;
                 const isRegister = item.id === 'register';
@@ -320,16 +361,19 @@ export const Navbar: React.FC<NavbarProps> = ({
                 return (
                   <button
                     key={item.id}
-                    onClick={() => onTabChange(item.id)}
-                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-[11px] sm:text-xs font-semibold tracking-wide whitespace-nowrap transition-all duration-150 cursor-pointer shrink-0 active:scale-95 ${
+                    type="button"
+                    onPointerDown={() => handleWarmTab(item.id)}
+                    onMouseEnter={() => handleWarmTab(item.id)}
+                    onClick={() => handleSelectTab(item.id)}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold tracking-wide whitespace-nowrap transition-colors duration-100 cursor-pointer shrink-0 active:scale-95 ${
                       isActive
                         ? 'bg-forest-700 text-white shadow-md shadow-forest-950/70 border border-forest-500/80 font-bold'
                         : 'text-charcoal-400 hover:text-white hover:bg-charcoal-900 border border-transparent hover:border-charcoal-800'
                     }`}
                   >
                     <Icon
-                      className={`w-3.5 h-3.5 sm:w-4 sm:h-4 transition-transform ${
-                        isActive ? 'text-forest-100 scale-105' : 'text-charcoal-400 group-hover:text-forest-400'
+                      className={`w-4 h-4 ${
+                        isActive ? 'text-forest-100' : 'text-charcoal-400'
                       }`}
                     />
                     <span>{item.label}</span>
@@ -347,13 +391,13 @@ export const Navbar: React.FC<NavbarProps> = ({
       </header>
 
       {/* ========================================================================= */}
-      {/* MOBILE BOTTOM NAVIGATION BAR (Fixed at bottom for easy thumb access) */}
+      {/* MOBILE BOTTOM NAVIGATION BAR (5 Spacious Thumb-Friendly Tabs) */}
       {/* ========================================================================= */}
       <nav
         aria-label="Mobile bottom navigation"
-        className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-charcoal-950/95 backdrop-blur-md border-t border-charcoal-800/90 px-1.5 py-1.5 grid grid-cols-6 gap-0.5 items-center shadow-2xl safe-area-bottom"
+        className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-charcoal-950 border-t border-charcoal-800 px-1.5 pt-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))] grid grid-cols-5 gap-1 items-center shadow-2xl"
       >
-        {mobilePrimaryTabs.map((item) => {
+        {MOBILE_PRIMARY_TABS.map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
           const isRegister = item.id === 'register';
@@ -361,17 +405,19 @@ export const Navbar: React.FC<NavbarProps> = ({
           return (
             <button
               key={item.id}
+              type="button"
+              onPointerDown={() => handleWarmTab(item.id)}
               onClick={() => handleSelectTab(item.id)}
-              className={`min-w-0 flex flex-col items-center justify-center py-1 px-0.5 rounded-xl transition-all cursor-pointer relative min-h-[46px] ${
+              className={`min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition-colors cursor-pointer relative min-h-[48px] active:scale-95 touch-manipulation ${
                 isActive
-                  ? 'text-forest-400 font-bold bg-charcoal-900/80 shadow-xs'
-                  : 'text-charcoal-400 hover:text-charcoal-200'
+                  ? 'text-forest-400 font-bold bg-charcoal-900 border border-forest-700/50'
+                  : 'text-charcoal-400 hover:text-charcoal-200 border border-transparent'
               }`}
             >
               <div className="relative">
                 <Icon className={`w-5 h-5 ${isActive ? 'text-forest-400' : 'text-charcoal-400'}`} />
                 {isRegister && cartItemCount > 0 && (
-                  <span className="absolute -top-1.5 -right-2 min-w-[16px] h-4 px-1 rounded-full bg-amber-400 text-charcoal-950 font-mono text-[9px] font-black flex items-center justify-center shadow-xs">
+                  <span className="absolute -top-1.5 -right-2.5 min-w-[16px] h-4 px-1 rounded-full bg-amber-400 text-charcoal-950 font-mono text-[9px] font-black flex items-center justify-center">
                     {cartItemCount}
                   </span>
                 )}
@@ -381,19 +427,20 @@ export const Navbar: React.FC<NavbarProps> = ({
           );
         })}
 
-        {/* 6th Button: More (Opens the Drawer) */}
+        {/* 5th Button: More (Opens Fast Drawer) */}
         <button
+          type="button"
           onClick={() => setIsMobileMenuOpen(true)}
-          className={`min-w-0 flex flex-col items-center justify-center py-1 px-0.5 rounded-xl transition-all cursor-pointer relative min-h-[46px] ${
+          className={`min-w-0 flex flex-col items-center justify-center py-1 px-1 rounded-xl transition-colors cursor-pointer relative min-h-[48px] active:scale-95 touch-manipulation ${
             isSecondaryTabActive || isMobileMenuOpen
-              ? 'text-amber-400 font-bold bg-charcoal-900/80 shadow-xs'
-              : 'text-charcoal-400 hover:text-charcoal-200'
+              ? 'text-amber-400 font-bold bg-charcoal-900 border border-amber-500/40'
+              : 'text-charcoal-400 hover:text-charcoal-200 border border-transparent'
           }`}
         >
           <div className="relative">
             <Menu className={`w-5 h-5 ${isSecondaryTabActive || isMobileMenuOpen ? 'text-amber-400' : 'text-charcoal-400'}`} />
             {isSecondaryTabActive && (
-              <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-amber-400 ring-2 ring-charcoal-950" />
+              <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-amber-400 ring-2 ring-charcoal-950" />
             )}
           </div>
           <span className="text-[10px] mt-0.5 tracking-tight truncate max-w-full">More</span>
@@ -401,26 +448,26 @@ export const Navbar: React.FC<NavbarProps> = ({
       </nav>
 
       {/* ========================================================================= */}
-      {/* MOBILE SLIDE-OVER NAVIGATION DRAWER */}
+      {/* MOBILE SLIDE-OVER NAVIGATION DRAWER (Fast, Zero-Blur, All Modules Grid) */}
       {/* ========================================================================= */}
       {isMobileMenuOpen && (
         <div className="md:hidden fixed inset-0 z-50 flex">
           {/* Backdrop */}
           <div
-            className="fixed inset-0 bg-black/75 backdrop-blur-xs transition-opacity"
+            className="fixed inset-0 bg-black/75"
             onClick={() => setIsMobileMenuOpen(false)}
           />
 
           {/* Drawer Sheet */}
-          <div className="relative ml-auto w-full max-w-xs bg-charcoal-900 border-l border-charcoal-800 shadow-2xl flex flex-col h-full z-10 overflow-y-auto">
+          <div className="relative ml-auto w-[88vw] max-w-sm bg-charcoal-900 border-l border-charcoal-800 shadow-2xl flex flex-col h-full z-10 overflow-y-auto">
             
             {/* Drawer Top Header */}
-            <div className="p-4 border-b border-charcoal-800 flex items-center justify-between bg-charcoal-950">
+            <div className="px-4 py-3 border-b border-charcoal-800 flex items-center justify-between bg-charcoal-950">
               <SappyLogo variant="wordmark" size="sm" showSubtitle={true} />
               <button
                 type="button"
                 onClick={() => setIsMobileMenuOpen(false)}
-                className="w-8 h-8 rounded-lg bg-charcoal-900 hover:bg-charcoal-800 text-charcoal-400 hover:text-white flex items-center justify-center border border-charcoal-700 cursor-pointer"
+                className="w-9 h-9 rounded-xl bg-charcoal-900 hover:bg-charcoal-800 text-charcoal-300 hover:text-white flex items-center justify-center border border-charcoal-700 cursor-pointer touch-manipulation"
                 aria-label="Close menu"
               >
                 <X className="w-4 h-4" />
@@ -428,15 +475,15 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
 
             {/* Current Staff User Card in Drawer */}
-            <div className="p-4 bg-charcoal-950/60 border-b border-charcoal-800">
+            <div className="px-4 py-3 bg-charcoal-950/80 border-b border-charcoal-800">
               {currentUser ? (
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-9 h-9 rounded-xl bg-forest-800 border border-forest-600/60 flex items-center justify-center font-bold text-sm text-forest-200">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-xl bg-forest-800 border border-forest-600/60 flex items-center justify-center font-bold text-sm text-forest-200 shrink-0">
                       {currentUser.fullName.charAt(0).toUpperCase()}
                     </div>
-                    <div>
-                      <p className="text-xs font-bold text-white truncate max-w-[140px]">
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-white truncate">
                         {currentUser.fullName}
                       </p>
                       <p className="text-[10px] font-mono text-forest-400 uppercase">
@@ -444,7 +491,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 shrink-0">
                     {onOpenChangeCredentials && (
                       <button
                         type="button"
@@ -452,19 +499,22 @@ export const Navbar: React.FC<NavbarProps> = ({
                           setIsMobileMenuOpen(false);
                           onOpenChangeCredentials();
                         }}
-                        className="p-1.5 text-amber-400 hover:text-amber-300 bg-charcoal-900 rounded-lg border border-charcoal-700 cursor-pointer"
+                        className="p-2 text-amber-400 hover:text-amber-300 bg-charcoal-900 rounded-xl border border-charcoal-700 cursor-pointer touch-manipulation"
                         title="Change Password & PIN"
+                        aria-label="Change Password and PIN"
                       >
                         <KeyRound className="w-4 h-4" />
                       </button>
                     )}
                     <button
+                      type="button"
                       onClick={() => {
                         setIsMobileMenuOpen(false);
                         onSignOut();
                       }}
-                      className="p-1.5 text-charcoal-400 hover:text-rose-400 bg-charcoal-900 rounded-lg border border-charcoal-700 cursor-pointer"
+                      className="p-2 text-charcoal-300 hover:text-rose-400 bg-charcoal-900 rounded-xl border border-charcoal-700 cursor-pointer touch-manipulation"
                       title="Sign out / Switch Staff"
+                      aria-label="Sign out"
                     >
                       <LogOut className="w-4 h-4" />
                     </button>
@@ -472,11 +522,12 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </div>
               ) : (
                 <button
+                  type="button"
                   onClick={() => {
                     setIsMobileMenuOpen(false);
                     onOpenAuth();
                   }}
-                  className="w-full py-2 px-3 bg-forest-700 hover:bg-forest-600 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-xs cursor-pointer"
+                  className="w-full py-2.5 px-3 bg-forest-700 hover:bg-forest-600 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 cursor-pointer touch-manipulation"
                 >
                   <LogIn className="w-4 h-4" />
                   <span>Sign In to Sappy POS</span>
@@ -484,49 +535,49 @@ export const Navbar: React.FC<NavbarProps> = ({
               )}
             </div>
 
-            {/* Drawer Navigation List */}
-            <div className="flex-1 p-3 space-y-1 overflow-y-auto">
-              <p className="px-3 pt-2 pb-1 text-[10px] font-mono font-bold uppercase text-charcoal-500 tracking-wider">
-                Store Management
+            {/* Drawer Navigation 2-Column Touch Grid */}
+            <div className="flex-1 p-3 overflow-y-auto">
+              <p className="px-1 pb-2 text-[10px] font-mono font-bold uppercase text-charcoal-500 tracking-wider">
+                All Modules
               </p>
 
-              {navItems.map((item) => {
-                const Icon = item.icon;
-                const isActive = activeTab === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    onClick={() => handleSelectTab(item.id)}
-                    className={`w-full px-3 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-between transition-colors cursor-pointer ${
-                      isActive
-                        ? 'bg-forest-700 text-white shadow-xs border border-forest-600'
-                        : 'text-charcoal-300 hover:text-white hover:bg-charcoal-800/70'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <Icon className={`w-4 h-4 ${isActive ? 'text-white' : 'text-forest-400'}`} />
-                      <span>{item.label}</span>
-                    </div>
-                    {item.id === 'register' && cartItemCount > 0 ? (
-                      <span className="px-1.5 py-0.2 rounded-full bg-amber-400 text-charcoal-950 font-mono text-[10px] font-black">
-                        {cartItemCount}
-                      </span>
-                    ) : (
-                      <ChevronRight className={`w-3.5 h-3.5 ${isActive ? 'text-white' : 'text-charcoal-600'}`} />
-                    )}
-                  </button>
-                );
-              })}
+              <div className="grid grid-cols-2 gap-2">
+                {NAV_ITEMS.map((item) => {
+                  const Icon = item.icon;
+                  const isActive = activeTab === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onPointerDown={() => handleWarmTab(item.id)}
+                      onClick={() => handleSelectTab(item.id)}
+                      className={`px-3 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer min-h-[44px] text-left touch-manipulation active:scale-[0.98] ${
+                        isActive
+                          ? 'bg-forest-700 text-white border border-forest-500 shadow-sm'
+                          : 'bg-charcoal-950/70 text-charcoal-200 hover:text-white hover:bg-charcoal-800 border border-charcoal-800'
+                      }`}
+                    >
+                      <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-white' : 'text-forest-400'}`} />
+                      <span className="truncate">{item.shortLabel || item.label}</span>
+                      {item.id === 'register' && cartItemCount > 0 && (
+                        <span className="ml-auto px-1.5 py-0.2 rounded-full bg-amber-400 text-charcoal-950 font-mono text-[9px] font-black shrink-0">
+                          {cartItemCount}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             {/* Quick Mobile Utilities Footer */}
-            <div className="p-4 border-t border-charcoal-800 bg-charcoal-950 space-y-2">
+            <div className="p-3 border-t border-charcoal-800 bg-charcoal-950 space-y-2 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
               <div className="grid grid-cols-2 gap-2">
                 {onToggleSound && (
                   <button
                     type="button"
                     onClick={onToggleSound}
-                    className={`p-2 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                    className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer touch-manipulation ${
                       isSoundMuted
                         ? 'bg-charcoal-900 text-charcoal-400 border-charcoal-700'
                         : 'bg-charcoal-900 text-forest-300 border-forest-600/60'
@@ -544,7 +595,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                       setIsMobileMenuOpen(false);
                       onOpenCustomerDisplay();
                     }}
-                    className="p-2 rounded-xl bg-charcoal-900 hover:bg-charcoal-800 border border-charcoal-700 text-xs font-semibold text-charcoal-200 flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="p-2.5 rounded-xl bg-charcoal-900 hover:bg-charcoal-800 border border-charcoal-700 text-xs font-semibold text-charcoal-200 flex items-center justify-center gap-1.5 cursor-pointer touch-manipulation"
                   >
                     <Monitor className="w-3.5 h-3.5 text-forest-400" />
                     <span>Customer View</span>
@@ -552,22 +603,34 @@ export const Navbar: React.FC<NavbarProps> = ({
                 )}
               </div>
 
-              {onOpenCommandPalette && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsMobileMenuOpen(false);
-                    onOpenCommandPalette();
-                  }}
-                  className="w-full p-2 bg-charcoal-900 hover:bg-charcoal-800 border border-charcoal-700 rounded-xl text-xs font-semibold text-charcoal-300 flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <Search className="w-3.5 h-3.5 text-forest-400" />
-                  <span>Search Catalog & Actions</span>
-                </button>
-              )}
+              <div className="grid grid-cols-2 gap-2">
+                {onOpenCloudSync && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMobileMenuOpen(false);
+                      onOpenCloudSync();
+                    }}
+                    className="p-2.5 bg-charcoal-900 hover:bg-charcoal-800 border border-charcoal-700 rounded-xl text-xs font-semibold text-charcoal-200 flex items-center justify-center gap-1.5 cursor-pointer touch-manipulation"
+                  >
+                    <Smartphone className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Pair / Cloud</span>
+                  </button>
+                )}
 
-              <div className="pt-2 text-center text-[10px] text-charcoal-500 font-mono">
-                Sappy Commercial POS • Mobile Ready
+                {onOpenCommandPalette && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMobileMenuOpen(false);
+                      onOpenCommandPalette();
+                    }}
+                    className="p-2.5 bg-charcoal-900 hover:bg-charcoal-800 border border-charcoal-700 rounded-xl text-xs font-semibold text-charcoal-200 flex items-center justify-center gap-1.5 cursor-pointer touch-manipulation"
+                  >
+                    <Search className="w-3.5 h-3.5 text-forest-400" />
+                    <span>Quick Search</span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -577,3 +640,5 @@ export const Navbar: React.FC<NavbarProps> = ({
     </>
   );
 };
+
+export const Navbar = memo(NavbarComponent);

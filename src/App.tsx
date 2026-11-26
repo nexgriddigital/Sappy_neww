@@ -18,6 +18,21 @@ import {
   CartItem,
 } from './types/pos.ts';
 
+const TAB_LOADERS: Record<TabType, () => Promise<unknown>> = {
+  dashboard: () => import('./components/DashboardTab.tsx'),
+  register: () => import('./components/RegisterTab.tsx'),
+  sales: () => import('./components/SalesLedgerTab.tsx'),
+  activity: () => import('./components/ActivityTab.tsx'),
+  credit: () => import('./components/CreditDebtTab.tsx'),
+  inventory: () => import('./components/InventoryTab.tsx'),
+  expenses: () => import('./components/ExpensesTab.tsx'),
+  reports: () => import('./components/ReportsTab.tsx'),
+  qrstudio: () => import('./components/QRBarcodeStudioTab.tsx'),
+  users: () => import('./components/UsersTab.tsx'),
+  settings: () => import('./components/SettingsTab.tsx'),
+  sync: () => import('./components/SupabaseSyncTab.tsx'),
+};
+
 const AuthPage = lazy(() => import('./components/AuthPage.tsx').then((m) => ({ default: m.AuthPage })));
 const DashboardTab = lazy(() => import('./components/DashboardTab.tsx').then((m) => ({ default: m.DashboardTab })));
 const RegisterTab = lazy(() => import('./components/RegisterTab.tsx').then((m) => ({ default: m.RegisterTab })));
@@ -116,6 +131,13 @@ export default function App() {
 
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const preloadTabChunk = useCallback((tab: TabType) => {
+    const load = TAB_LOADERS[tab];
+    if (load) {
+      void load().catch(() => {});
+    }
   }, []);
 
   // POS Sound Toggle
@@ -331,6 +353,27 @@ export default function App() {
     return () => window.removeEventListener('hashchange', syncVerifyFromUrl);
   }, []);
 
+  // Preload primary mobile & desktop tab chunks during browser idle time for instant switching
+  useEffect(() => {
+    if (!currentUser || isInitialLoading) return;
+    const primaryTabs: TabType[] = ['register', 'dashboard', 'inventory', 'sales', 'activity'];
+    const win = window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    const prefetch = () => {
+      primaryTabs.forEach((tab) => preloadTabChunk(tab));
+    };
+
+    if (typeof win.requestIdleCallback === 'function') {
+      const id = win.requestIdleCallback(prefetch, { timeout: 1200 });
+      return () => win.cancelIdleCallback?.(id);
+    }
+
+    const timer = window.setTimeout(prefetch, 600);
+    return () => window.clearTimeout(timer);
+  }, [currentUser, isInitialLoading, preloadTabChunk]);
+
   const handleExitVerification = useCallback(() => {
     setVerifyToken(null);
     try {
@@ -516,15 +559,35 @@ export default function App() {
     }
   };
 
-  const handleSignOut = () => {
+  const handleSignOut = useCallback(() => {
     storageService.setCurrentUser(null);
     setCurrentUser(null);
     showToast('Signed Out', 'Please sign in to access terminal', 'info', 2500);
-  };
+  }, [showToast]);
 
-  const handleOpenAuth = () => {
+  const handleOpenAuth = useCallback(() => {
     setIsAuthModalOpen(true);
-  };
+  }, []);
+
+  const handleManualSync = useCallback(() => {
+    void crossDeviceSyncService.syncNow();
+  }, []);
+
+  const handleOpenCloudSync = useCallback(() => {
+    setIsCloudSyncModalOpen(true);
+  }, []);
+
+  const handleOpenCommandPalette = useCallback(() => {
+    setIsCommandPaletteOpen(true);
+  }, []);
+
+  const handleOpenCustomerDisplay = useCallback(() => {
+    setIsCustomerDisplayOpen(true);
+  }, []);
+
+  const handleOpenChangeCredentials = useCallback(() => {
+    setIsChangeCredentialsOpen(true);
+  }, []);
 
   // Public / In-App Invoice QR Verification View (accessible directly on customer smartphones without POS login)
   if (verifyToken) {
@@ -576,20 +639,21 @@ export default function App() {
       <Navbar
         activeTab={activeTab}
         onTabChange={setActiveTab}
+        onPreloadTab={preloadTabChunk}
         cartItemCount={activeCartData.cart.reduce((sum, item) => sum + item.quantity, 0)}
         currentUser={currentUser}
         onSignOut={handleSignOut}
         onOpenAuth={handleOpenAuth}
         syncStatus={syncState.status}
-        onManualSync={() => crossDeviceSyncService.syncNow()}
-        onOpenCloudSync={() => setIsCloudSyncModalOpen(true)}
-        onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
-        onOpenCustomerDisplay={() => setIsCustomerDisplayOpen(true)}
+        onManualSync={handleManualSync}
+        onOpenCloudSync={handleOpenCloudSync}
+        onOpenCommandPalette={handleOpenCommandPalette}
+        onOpenCustomerDisplay={handleOpenCustomerDisplay}
         isSoundMuted={isSoundMuted}
         onToggleSound={handleToggleSound}
         isFullscreen={isFullscreen}
         onToggleFullscreen={handleToggleFullscreen}
-        onOpenChangeCredentials={currentUser ? () => setIsChangeCredentialsOpen(true) : undefined}
+        onOpenChangeCredentials={currentUser ? handleOpenChangeCredentials : undefined}
       />
 
       {/* Main Tab Content */}

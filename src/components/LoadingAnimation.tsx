@@ -73,11 +73,37 @@ export const PulseSyncIndicator: React.FC<{
     }
   };
 
+  const getShortLabel = () => {
+    switch (status) {
+      case 'syncing':
+        return 'Syncing';
+      case 'synced':
+        return 'Synced';
+      case 'offline':
+        return 'Local';
+      case 'error':
+        return 'Error';
+    }
+  };
+
+  const getFullLabel = () => {
+    switch (status) {
+      case 'syncing':
+        return 'Syncing...';
+      case 'synced':
+        return 'Cloud Synced';
+      case 'offline':
+        return 'Local (Connect)';
+      case 'error':
+        return 'Sync Error';
+    }
+  };
+
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-mono font-semibold border transition-all cursor-pointer active:scale-95 shadow-2xs ${getStatusColor()}`}
+      className={`inline-flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-lg text-[10px] sm:text-[11px] font-mono font-semibold border transition-colors cursor-pointer active:scale-95 ${getStatusColor()}`}
       title={
         status === 'synced'
           ? 'Cloud Synced. Click to manage cloud connection.'
@@ -86,7 +112,7 @@ export const PulseSyncIndicator: React.FC<{
           : 'Running in Local Mode. Click to connect Supabase or Cloud Server.'
       }
     >
-      <span className="relative flex h-2 w-2">
+      <span className="relative flex h-2 w-2 shrink-0">
         {status === 'synced' && (
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
         )}
@@ -102,15 +128,8 @@ export const PulseSyncIndicator: React.FC<{
           }`}
         />
       </span>
-      <span>
-        {status === 'syncing'
-          ? 'Syncing...'
-          : status === 'synced'
-          ? 'Cloud Synced'
-          : status === 'offline'
-          ? 'Local (Connect)'
-          : 'Sync Error'}
-      </span>
+      <span className="sm:hidden">{getShortLabel()}</span>
+      <span className="hidden sm:inline">{getFullLabel()}</span>
     </button>
   );
 };
