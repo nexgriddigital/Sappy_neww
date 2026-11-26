@@ -51,6 +51,8 @@ class CrossDeviceSyncService {
   private readonly instanceId = Math.random().toString(36).slice(2, 10);
   private hasPendingLocalMutation = false;
   private lastSupabaseSyncCompletedAt = 0;
+  private lastSupabaseWriteAt = 0;
+  private expressEndpointAvailable: boolean | null = null;
 
   constructor() {
     this.autoSyncMode = this.loadAutoSyncMode();
@@ -335,6 +337,7 @@ class CrossDeviceSyncService {
     } else {
       localStorage.removeItem('sappy_custom_backend_url');
     }
+    this.expressEndpointAvailable = null;
     this.syncNow();
   }
 
@@ -387,7 +390,7 @@ class CrossDeviceSyncService {
 
       if (backend) {
         urlsToTry.push(backend.endsWith('/') ? `${backend}api/pos/state` : `${backend}/api/pos/state`);
-      } else {
+      } else if (this.expressEndpointAvailable !== false) {
         urlsToTry.push('/api/pos/state');
       }
 
@@ -409,8 +412,10 @@ class CrossDeviceSyncService {
           if (response.ok) {
             const contentType = response.headers.get('content-type') || '';
             if (!contentType.includes('application/json')) {
+              if (!backend) this.expressEndpointAvailable = false;
               continue; // Not JSON (probably HTML 404 page from static host)
             }
+            if (!backend) this.expressEndpointAvailable = true;
 
             const result = await response.json();
             if (this.isResetting) return false;
@@ -515,7 +520,7 @@ class CrossDeviceSyncService {
           const p = msg?.payload || {};
           if (p.clientId === this.instanceId) return;
           if (this.isResetting || this.autoSyncMode !== 'live') return;
-          if (Date.now() - this.lastSupabaseSyncCompletedAt < 1200) return;
+          if (Date.now() - Math.max(this.lastSupabaseSyncCompletedAt, this.lastSupabaseWriteAt) < 3500) return;
           this.triggerActionSync(180);
         })
         .on(
@@ -527,7 +532,7 @@ class CrossDeviceSyncService {
           },
           () => {
             if (this.isResetting || this.autoSyncMode !== 'live') return;
-            if (Date.now() - this.lastSupabaseSyncCompletedAt < 1200) return;
+            if (Date.now() - Math.max(this.lastSupabaseSyncCompletedAt, this.lastSupabaseWriteAt) < 4000) return;
             this.triggerActionSync(220);
           }
         )
@@ -634,7 +639,7 @@ class CrossDeviceSyncService {
     const customUrl = this.getBackendUrl();
     if (customUrl) {
       postUrlsToTry.push(customUrl.endsWith('/') ? `${customUrl}api/pos/sync` : `${customUrl}/api/pos/sync`);
-    } else {
+    } else if (this.expressEndpointAvailable !== false) {
       postUrlsToTry.push('/api/pos/sync');
     }
 
@@ -664,8 +669,10 @@ class CrossDeviceSyncService {
         if (response.ok) {
           const contentType = response.headers.get('content-type') || '';
           if (!contentType.includes('application/json')) {
+            if (!customUrl) this.expressEndpointAvailable = false;
             continue; // Not JSON (probably HTML 404 page from static host)
           }
+          if (!customUrl) this.expressEndpointAvailable = true;
 
           const result = await response.json();
           if (this.isResetting) return finishSync(false);
@@ -887,334 +894,416 @@ class CrossDeviceSyncService {
             }
           }
 
-          // 1. Products Sync (respect updatedAt & syncStartedAt so sales deductions never revert)
+          // 1-6. Parallel Supabase Pull + Diff-Only Parallel Push
           if (this.isResetting) return finishSync(false);
-          try {
-            if (!options?.isNewSetup) {
-              const { data: remoteProducts } = await client.from('products').select('*');
-              if (this.isResetting) return finishSync(false);
-              if (remoteProducts && Array.isArray(remoteProducts) && remoteProducts.length > 0) {
-              const mappedProducts = remoteProducts.map((p: any) => ({
-                id: p.id,
-                sku: p.sku,
-                barcode: p.barcode || '',
-                name: p.name,
-                category: p.category,
-                costPrice: Number(p.cost_price || 0),
-                sellingPrice: Number(p.selling_price || 0),
-                stockLevel: Number(p.stock_level || 0),
-                lowStockThreshold: Number(p.low_stock_threshold || 5),
-                unit: p.unit || 'pcs',
-                description: p.description || '',
-                updatedAt: p.updated_at || undefined,
-              }));
-              storageService.mergeProductsFromRemote(mappedProducts, syncStartedAt);
-              }
-            }
 
+          const deletedCustIds = storageService.getDeletedCustomerIds().filter((id) => !id.startsWith('__system_'));
+          const delSet = new Set(deletedCustIds);
+
+          let remoteProductsRaw: any[] = [];
+          let remoteCustomersRaw: any[] = [];
+          let remoteSalesRaw: any[] = [];
+          let remotePaymentsRaw: any[] = [];
+          let remoteExpensesRaw: any[] = [];
+          let remoteUsersFound: any[] = [];
+          let tableSyncSucceeded = false;
+
+          if (!options?.isNewSetup) {
+            const [prodRes, custRes, saleRes, payRes, expRes, userRes] = await Promise.allSettled([
+              client.from('products').select('*'),
+              client.from('customers').select('*'),
+              client.from('sales').select('*'),
+              client.from('credit_payments').select('*'),
+              client.from('expenses').select('*'),
+              client.from('app_users').select('*'),
+            ]);
             if (this.isResetting) return finishSync(false);
-            const currentProducts = storageService.getProducts();
-            if (currentProducts.length > 0) {
-              const { error: prodErr } = await client.from('products').upsert(
-                currentProducts.map((p) => ({
-                  id: p.id,
-                  sku: p.sku,
-                  barcode: p.barcode || '',
-                  name: p.name,
-                  category: p.category,
-                  cost_price: p.costPrice,
-                  selling_price: p.sellingPrice,
-                  stock_level: p.stockLevel,
-                  low_stock_threshold: p.lowStockThreshold,
-                  unit: p.unit,
-                  description: p.description,
-                  updated_at: p.updatedAt || new Date().toISOString(),
-                }))
-              );
-              if (prodErr && (prodErr.code === '42501' || prodErr.message?.includes('row-level security'))) {
-                hasRlsError = true;
-              }
-            }
-          } catch (pErr) {
-            console.warn('Supabase product sync notice:', pErr);
-          }
 
-          // 2. Customers Sync
-          try {
-            const deletedCustIds = storageService.getDeletedCustomerIds();
-            if (deletedCustIds.length > 0) {
-              for (const delId of deletedCustIds) {
-                if (delId.startsWith('__system_')) continue;
-                try {
-                  await client.from('customers').delete().eq('id', delId);
-                } catch {}
-              }
+            if (prodRes.status === 'fulfilled' && Array.isArray(prodRes.value.data)) {
+              remoteProductsRaw = prodRes.value.data;
+            }
+            if (custRes.status === 'fulfilled' && Array.isArray(custRes.value.data)) {
+              remoteCustomersRaw = custRes.value.data;
+            }
+            if (saleRes.status === 'fulfilled' && Array.isArray(saleRes.value.data)) {
+              remoteSalesRaw = saleRes.value.data;
+            }
+            if (payRes.status === 'fulfilled' && Array.isArray(payRes.value.data)) {
+              remotePaymentsRaw = payRes.value.data;
+            }
+            if (expRes.status === 'fulfilled' && Array.isArray(expRes.value.data)) {
+              remoteExpensesRaw = expRes.value.data;
+            }
+            if (userRes.status === 'fulfilled' && !userRes.value.error && Array.isArray(userRes.value.data)) {
+              tableSyncSucceeded = true;
+              remoteUsersFound = userRes.value.data.map((u: any) => ({
+                id: u.id,
+                email: u.email,
+                fullName: u.full_name || u.fullName || u.email.split('@')[0],
+                role: u.role || 'owner',
+                storeName: u.store_name || u.storeName || 'Sappy Stationary',
+                phone: u.phone || undefined,
+                pinCode: u.pin_code || u.pinCode || undefined,
+                password: u.password !== undefined ? u.password : undefined,
+                status: u.status || 'active',
+                createdAt: u.created_at || u.createdAt || new Date().toISOString(),
+                updatedAt: u.updated_at || u.updatedAt || undefined,
+                lastLoginAt: u.last_login_at || u.lastLoginAt || undefined,
+                notes: u.notes || undefined,
+              }));
             }
 
-            if (!options?.isNewSetup) {
-              const { data: remoteCustomers } = await client.from('customers').select('*');
-              if (remoteCustomers && Array.isArray(remoteCustomers) && remoteCustomers.length > 0) {
-              const delSet = new Set(deletedCustIds);
+            // Merge Products
+            const mappedProducts = remoteProductsRaw.map((p: any) => ({
+              id: p.id,
+              sku: p.sku,
+              barcode: p.barcode || '',
+              name: p.name,
+              category: p.category,
+              costPrice: Number(p.cost_price || 0),
+              sellingPrice: Number(p.selling_price || 0),
+              stockLevel: Number(p.stock_level || 0),
+              lowStockThreshold: Number(p.low_stock_threshold || 5),
+              unit: p.unit || 'pcs',
+              description: p.description || '',
+              updatedAt: p.updated_at || undefined,
+            }));
+            if (mappedProducts.length > 0) {
+              storageService.mergeProductsFromRemote(mappedProducts, syncStartedAt);
+            }
 
-              // Check if resilient staff registry record is in customers table
-              const staffRegRecord = remoteCustomers.find((c: any) => c.id === '__system_staff_registry__');
-              if (staffRegRecord && staffRegRecord.notes) {
-                try {
-                  const parsedStaff = JSON.parse(staffRegRecord.notes);
-                  if (Array.isArray(parsedStaff) && parsedStaff.length > 0) {
-                    storageService.hydrateFromServer({ users: parsedStaff });
-                  }
-                } catch {}
-              }
-
-              const mappedCustomers = remoteCustomers
-                .filter((c: any) => !delSet.has(c.id) && !c.id.startsWith('__system_'))
-                .map((c: any) => decodeCustomerFromRemoteRow(c));
+            // Merge Customers + fallback staff registry
+            const staffRegRecord = remoteCustomersRaw.find((c: any) => c.id === '__system_staff_registry__');
+            if (!tableSyncSucceeded && staffRegRecord && staffRegRecord.notes) {
+              try {
+                const parsedStaff = JSON.parse(staffRegRecord.notes);
+                if (Array.isArray(parsedStaff) && parsedStaff.length > 0) {
+                  remoteUsersFound = parsedStaff;
+                }
+              } catch {}
+            }
+            const mappedCustomers = remoteCustomersRaw
+              .filter((c: any) => !delSet.has(c.id) && !c.id.startsWith('__system_'))
+              .map((c: any) => decodeCustomerFromRemoteRow(c));
+            if (mappedCustomers.length > 0) {
               storageService.mergeCustomersFromRemote(mappedCustomers, syncStartedAt);
-              }
             }
 
-            const currentCustomers = storageService.getCustomers().filter((c) => !c.id.startsWith('__system_'));
-            if (currentCustomers.length > 0) {
-              const { error: custErr } = await client.from('customers').upsert(
-                currentCustomers.map((c) => ({
-                  id: c.id,
-                  name: c.name,
-                  company_name: c.companyName || null,
-                  phone: c.phone,
-                  email: c.email || null,
-                  address: c.address || null,
-                  tax_number: c.taxNumber || null,
-                  credit_balance: c.creditBalance,
-                  credit_limit: c.creditLimit,
-                  total_purchased: c.totalPurchased,
-                  notes: encodeCustomerNotesWithMeta(c),
-                }))
-              );
-              if (custErr && (custErr.code === '42501' || custErr.message?.includes('row-level security'))) {
-                hasRlsError = true;
+            // Merge Sales (preserving full refund/return metadata)
+            if (remoteSalesRaw.length > 0) {
+              const mappedSales: Sale[] = remoteSalesRaw.map((s: any) => decodeSaleFromRemoteRow(s));
+              const localSales = storageService.getSales();
+              const salesMap = new Map(localSales.map((s) => [s.id, s]));
+              for (const rs of mappedSales) {
+                const existing = salesMap.get(rs.id);
+                if (existing && existing.isReturned && !rs.isReturned) {
+                  salesMap.set(rs.id, { ...rs, ...existing, isReturned: true, status: 'returned' });
+                } else if (rs.isReturned && existing) {
+                  salesMap.set(rs.id, { ...existing, ...rs, isReturned: true, status: 'returned' });
+                } else {
+                  salesMap.set(rs.id, rs);
+                }
               }
+              storageService.hydrateFromServer({ sales: Array.from(salesMap.values()) }, syncStartedAt);
             }
-          } catch (cErr) {
-            console.warn('Supabase customer sync notice:', cErr);
+
+            // Merge Credit Payments
+            if (remotePaymentsRaw.length > 0) {
+              const mappedPayments: CreditPayment[] = remotePaymentsRaw.map((p: any) => ({
+                id: p.id,
+                customerId: p.customer_id,
+                customerName: p.customer_name,
+                saleId: p.sale_id || undefined,
+                amount: Number(p.amount || 0),
+                paymentMethod: p.payment_method || 'cash',
+                timestamp: p.timestamp || new Date().toISOString(),
+                receiptNumber: p.receipt_number,
+                notes: p.notes || undefined,
+              }));
+              const localPayments = storageService.getCreditPayments();
+              const payMap = new Map(localPayments.map((p) => [p.id, p]));
+              for (const rp of mappedPayments) {
+                payMap.set(rp.id, rp);
+              }
+              storageService.hydrateFromServer({ creditPayments: Array.from(payMap.values()) });
+            }
+
+            // Merge Expenses
+            if (remoteExpensesRaw.length > 0) {
+              const mappedExpenses: Expense[] = remoteExpensesRaw.map((e: any) => ({
+                id: e.id,
+                date: e.date,
+                category: e.category,
+                title: e.title,
+                amount: Number(e.amount || 0),
+                paymentMethod: e.payment_method || 'cash',
+                payee: e.payee,
+                receiptNumber: e.receipt_number || undefined,
+                notes: e.notes || undefined,
+                createdAt: e.created_at || new Date().toISOString(),
+              }));
+              const localExpenses = storageService.getExpenses();
+              const expMap = new Map(localExpenses.map((e) => [e.id, e]));
+              for (const re of mappedExpenses) {
+                expMap.set(re.id, re);
+              }
+              storageService.hydrateFromServer({ expenses: Array.from(expMap.values()) });
+            }
+
+            // Merge Users
+            if (remoteUsersFound.length > 0) {
+              storageService.hydrateFromServer({ users: remoteUsersFound });
+            }
           }
 
-          // 3. Sales Sync (preserving full refund/return metadata via syncMetadataCodec)
-          try {
-            if (!options?.isNewSetup) {
-              const { data: remoteSales } = await client.from('sales').select('*');
-              if (remoteSales && Array.isArray(remoteSales) && remoteSales.length > 0) {
-                const mappedSales: Sale[] = remoteSales.map((s: any) => decodeSaleFromRemoteRow(s));
-                const localSales = storageService.getSales();
-                const salesMap = new Map(localSales.map((s) => [s.id, s]));
-                for (const rs of mappedSales) {
-                  const existing = salesMap.get(rs.id);
-                  if (existing && existing.isReturned && !rs.isReturned) {
-                    salesMap.set(rs.id, { ...rs, ...existing, isReturned: true, status: 'returned' });
-                  } else if (rs.isReturned && existing) {
-                    salesMap.set(rs.id, { ...existing, ...rs, isReturned: true, status: 'returned' });
-                  } else {
-                    salesMap.set(rs.id, rs);
+          if (this.isResetting) return finishSync(false);
+
+          // Determine only the tables that have local changes to push
+          const currentProducts = storageService.getProducts();
+          const currentCustomers = storageService.getCustomers().filter((c) => !c.id.startsWith('__system_'));
+          const currentSales = storageService.getSales();
+          const currentPayments = storageService.getCreditPayments();
+          const currentExpenses = storageService.getExpenses();
+          const currentUsers = storageService.getUsers();
+
+          const remoteProdMap = new Map(remoteProductsRaw.map((p: any) => [p.id, p]));
+          const productsNeedPush =
+            Boolean(options?.isNewSetup) ||
+            (currentProducts.length > 0 &&
+              (didMutateLocally ||
+                currentProducts.some((p) => {
+                  const rp = remoteProdMap.get(p.id);
+                  if (!rp) return true;
+                  return (
+                    Number(rp.stock_level || 0) !== Number(p.stockLevel || 0) ||
+                    Number(rp.selling_price || 0) !== Number(p.sellingPrice || 0) ||
+                    (p.updatedAt || '') > (rp.updated_at || '')
+                  );
+                })));
+
+          const remoteCustMap = new Map(
+            remoteCustomersRaw
+              .filter((c: any) => !String(c.id).startsWith('__system_'))
+              .map((c: any) => [c.id, decodeCustomerFromRemoteRow(c)])
+          );
+          const customersNeedPush =
+            Boolean(options?.isNewSetup) ||
+            (currentCustomers.length > 0 &&
+              (didMutateLocally ||
+                currentCustomers.some((c) => {
+                  const rc = remoteCustMap.get(c.id);
+                  if (!rc) return true;
+                  return (
+                    Number(rc.creditBalance || 0) !== Number(c.creditBalance || 0) ||
+                    Number(rc.totalPurchased || 0) !== Number(c.totalPurchased || 0) ||
+                    (c.updatedAt || '') > (rc.updatedAt || '')
+                  );
+                })));
+
+          const remoteSalesMap = new Map(
+            remoteSalesRaw.map((s: any) => [s.id, decodeSaleFromRemoteRow(s)])
+          );
+          const salesNeedPush =
+            Boolean(options?.isNewSetup) ||
+            (currentSales.length > 0 &&
+              (didMutateLocally ||
+                currentSales.some((s) => {
+                  const rs = remoteSalesMap.get(s.id);
+                  if (!rs) return true;
+                  return (
+                    Boolean(s.isReturned) !== Boolean(rs.isReturned) ||
+                    Number(s.paidAmount || 0) !== Number(rs.paidAmount || 0) ||
+                    Boolean(s.isCreditPaid) !== Boolean(rs.isCreditPaid)
+                  );
+                })));
+
+          const remotePayIds = new Set(remotePaymentsRaw.map((p: any) => p.id));
+          const paymentsNeedPush =
+            Boolean(options?.isNewSetup) ||
+            (currentPayments.length > 0 && (didMutateLocally || currentPayments.some((p) => !remotePayIds.has(p.id))));
+
+          const remoteExpIds = new Set(remoteExpensesRaw.map((e: any) => e.id));
+          const expensesNeedPush =
+            Boolean(options?.isNewSetup) ||
+            (currentExpenses.length > 0 && (didMutateLocally || currentExpenses.some((e) => !remoteExpIds.has(e.id))));
+
+          const remoteUserMap = new Map(remoteUsersFound.map((u: any) => [u.id, u]));
+          const usersNeedPush =
+            Boolean(options?.isNewSetup) ||
+            (currentUsers.length > 0 &&
+              (didMutateLocally ||
+                currentUsers.some((u) => {
+                  const ru = remoteUserMap.get(u.id);
+                  return !ru || (u.updatedAt || '') > (ru.updatedAt || '');
+                })));
+
+          const writeTasks: Array<Promise<void>> = [];
+          this.lastSupabaseWriteAt = Date.now();
+
+          if (deletedCustIds.length > 0) {
+            writeTasks.push(
+              Promise.resolve(
+                client.from('customers').delete().in('id', deletedCustIds)
+              )
+                .then(() => {})
+                .catch(() => {})
+            );
+          }
+
+          if (productsNeedPush && currentProducts.length > 0) {
+            writeTasks.push(
+              Promise.resolve(
+                client.from('products').upsert(
+                  currentProducts.map((p) => ({
+                    id: p.id,
+                    sku: p.sku,
+                    barcode: p.barcode || '',
+                    name: p.name,
+                    category: p.category,
+                    cost_price: p.costPrice,
+                    selling_price: p.sellingPrice,
+                    stock_level: p.stockLevel,
+                    low_stock_threshold: p.lowStockThreshold,
+                    unit: p.unit,
+                    description: p.description,
+                    updated_at: p.updatedAt || new Date().toISOString(),
+                  }))
+                )
+              )
+                .then(({ error: prodErr }) => {
+                  if (prodErr && (prodErr.code === '42501' || prodErr.message?.includes('row-level security'))) {
+                    hasRlsError = true;
                   }
-                }
-                storageService.hydrateFromServer({ sales: Array.from(salesMap.values()) }, syncStartedAt);
-              }
-            }
-
-            const currentSales = storageService.getSales();
-            if (currentSales.length > 0) {
-              const { error: salesErr } = await client.from('sales').upsert(
-                currentSales.map((s) => ({
-                  id: s.id,
-                  invoice_number: s.invoiceNumber,
-                  timestamp: s.timestamp,
-                  customer_id: s.customerId || null,
-                  customer_name: s.customerName,
-                  customer_phone: s.customerPhone || null,
-                  customer_email: s.customerEmail || null,
-                  customer_address: s.customerAddress || null,
-                  subtotal: s.subtotal,
-                  tax_rate: s.taxRate,
-                  tax_amount: s.taxAmount,
-                  discount_amount: s.discountAmount,
-                  total_amount: s.totalAmount,
-                  total_cost: s.totalCost,
-                  gross_profit: s.grossProfit,
-                  payment_method: s.paymentMethod,
-                  amount_tendered: s.amountTendered,
-                  change_given: s.changeGiven,
-                  is_credit_paid: s.isCreditPaid,
-                  credit_due_date: s.creditDueDate || null,
-                  paid_amount: s.paidAmount || 0,
-                  notes: encodeSaleNotesWithReturnMetadata(s),
-                  items: s.items || [],
-                }))
-              );
-              if (salesErr && (salesErr.code === '42501' || salesErr.message?.includes('row-level security'))) {
-                hasRlsError = true;
-              }
-            }
-          } catch (sErr) {
-            console.warn('Supabase sales sync notice:', sErr);
+                })
+                .catch((pErr) => console.warn('Supabase product sync notice:', pErr))
+            );
           }
 
-          // 4. Credit Debt Payments Sync
-          try {
-            if (!options?.isNewSetup) {
-              const { data: remotePayments } = await client.from('credit_payments').select('*');
-              if (remotePayments && Array.isArray(remotePayments) && remotePayments.length > 0) {
-                const mappedPayments: CreditPayment[] = remotePayments.map((p: any) => ({
-                  id: p.id,
-                  customerId: p.customer_id,
-                  customerName: p.customer_name,
-                  saleId: p.sale_id || undefined,
-                  amount: Number(p.amount || 0),
-                  paymentMethod: p.payment_method || 'cash',
-                  timestamp: p.timestamp || new Date().toISOString(),
-                  receiptNumber: p.receipt_number,
-                  notes: p.notes || undefined,
-                }));
-                const localPayments = storageService.getCreditPayments();
-                const payMap = new Map(localPayments.map((p) => [p.id, p]));
-                for (const rp of mappedPayments) {
-                  payMap.set(rp.id, rp);
-                }
-                storageService.hydrateFromServer({ creditPayments: Array.from(payMap.values()) });
-              }
-            }
-
-            const currentPayments = storageService.getCreditPayments();
-            if (currentPayments.length > 0) {
-              const { error: payErr } = await client.from('credit_payments').upsert(
-                currentPayments.map((p) => ({
-                  id: p.id,
-                  customer_id: p.customerId,
-                  customer_name: p.customerName,
-                  sale_id: p.saleId || null,
-                  amount: p.amount,
-                  payment_method: p.paymentMethod,
-                  timestamp: p.timestamp,
-                  receipt_number: p.receiptNumber,
-                  notes: p.notes || null,
-                }))
-              );
-              if (payErr && (payErr.code === '42501' || payErr.message?.includes('row-level security'))) {
-                hasRlsError = true;
-              }
-            }
-          } catch (pErr) {
-            console.warn('Supabase credit payments sync notice:', pErr);
-          }
-
-          // 5. Expenses Sync
-          try {
-            if (!options?.isNewSetup) {
-              const { data: remoteExpenses } = await client.from('expenses').select('*');
-              if (remoteExpenses && Array.isArray(remoteExpenses) && remoteExpenses.length > 0) {
-                const mappedExpenses: Expense[] = remoteExpenses.map((e: any) => ({
-                  id: e.id,
-                  date: e.date,
-                  category: e.category,
-                  title: e.title,
-                  amount: Number(e.amount || 0),
-                  paymentMethod: e.payment_method || 'cash',
-                  payee: e.payee,
-                  receiptNumber: e.receipt_number || undefined,
-                  notes: e.notes || undefined,
-                  createdAt: e.created_at || new Date().toISOString(),
-                }));
-                const localExpenses = storageService.getExpenses();
-                const expMap = new Map(localExpenses.map((e) => [e.id, e]));
-                for (const re of mappedExpenses) {
-                  expMap.set(re.id, re);
-                }
-                storageService.hydrateFromServer({ expenses: Array.from(expMap.values()) });
-              }
-            }
-
-            const currentExpenses = storageService.getExpenses();
-            if (currentExpenses.length > 0) {
-              const { error: expErr } = await client.from('expenses').upsert(
-                currentExpenses.map((e) => ({
-                  id: e.id,
-                  date: e.date,
-                  category: e.category,
-                  title: e.title,
-                  amount: e.amount,
-                  payment_method: e.paymentMethod,
-                  payee: e.payee,
-                  receipt_number: e.receiptNumber || null,
-                  notes: e.notes || null,
-                }))
-              );
-              if (expErr && (expErr.code === '42501' || expErr.message?.includes('row-level security'))) {
-                hasRlsError = true;
-              }
-            }
-          } catch (eErr) {
-            console.warn('Supabase expenses sync notice:', eErr);
-          }
-
-          // 6. Users & Staff Profiles Sync (Dual-Channel: Dedicated Table + Resilient System Cloud Registry)
-          try {
-            let remoteUsersFound: any[] = [];
-            let tableSyncSucceeded = false;
-
-            // Strategy A: Check dedicated 'app_users' or 'users' table
-            try {
-              const { data: remoteAppUsers, error: usersErr } = await client.from('app_users').select('*');
-              if (!usersErr && remoteAppUsers && Array.isArray(remoteAppUsers)) {
-                tableSyncSucceeded = true;
-                remoteUsersFound = remoteAppUsers.map((u: any) => ({
-                  id: u.id,
-                  email: u.email,
-                  fullName: u.full_name || u.fullName || u.email.split('@')[0],
-                  role: u.role || 'owner',
-                  storeName: u.store_name || u.storeName || 'Sappy Stationary',
-                  phone: u.phone || undefined,
-                  pinCode: u.pin_code || u.pinCode || undefined,
-                  password: u.password !== undefined ? u.password : undefined,
-                  status: u.status || 'active',
-                  createdAt: u.created_at || u.createdAt || new Date().toISOString(),
-                  updatedAt: u.updated_at || u.updatedAt || undefined,
-                  lastLoginAt: u.last_login_at || u.lastLoginAt || undefined,
-                  notes: u.notes || undefined,
-                }));
-              }
-            } catch {}
-
-              // Strategy B: If table not yet created, fetch from resilient staff registry record in Supabase
-              if (!tableSyncSucceeded && !options?.isNewSetup) {
-                try {
-                  const { data: regData } = await client
-                    .from('customers')
-                    .select('notes')
-                    .eq('id', '__system_staff_registry__')
-                    .maybeSingle();
-
-                  if (regData && regData.notes) {
-                    const parsed = JSON.parse(regData.notes);
-                    if (Array.isArray(parsed) && parsed.length > 0) {
-                      remoteUsersFound = parsed;
-                    }
+          if (customersNeedPush && currentCustomers.length > 0) {
+            writeTasks.push(
+              Promise.resolve(
+                client.from('customers').upsert(
+                  currentCustomers.map((c) => ({
+                    id: c.id,
+                    name: c.name,
+                    company_name: c.companyName || null,
+                    phone: c.phone,
+                    email: c.email || null,
+                    address: c.address || null,
+                    tax_number: c.taxNumber || null,
+                    credit_balance: c.creditBalance,
+                    credit_limit: c.creditLimit,
+                    total_purchased: c.totalPurchased,
+                    notes: encodeCustomerNotesWithMeta(c),
+                  }))
+                )
+              )
+                .then(({ error: custErr }) => {
+                  if (custErr && (custErr.code === '42501' || custErr.message?.includes('row-level security'))) {
+                    hasRlsError = true;
                   }
-                } catch (regFetchErr) {
-                  console.warn('System staff registry fetch notice:', regFetchErr);
-                }
-              }
+                })
+                .catch((cErr) => console.warn('Supabase customer sync notice:', cErr))
+            );
+          }
 
-              // Hydrate and merge remote users with local users (never pull old users during new setup)
-              if (!options?.isNewSetup && remoteUsersFound.length > 0) {
-                storageService.hydrateFromServer({ users: remoteUsersFound });
-              }
+          if (salesNeedPush && currentSales.length > 0) {
+            writeTasks.push(
+              Promise.resolve(
+                client.from('sales').upsert(
+                  currentSales.map((s) => ({
+                    id: s.id,
+                    invoice_number: s.invoiceNumber,
+                    timestamp: s.timestamp,
+                    customer_id: s.customerId || null,
+                    customer_name: s.customerName,
+                    customer_phone: s.customerPhone || null,
+                    customer_email: s.customerEmail || null,
+                    customer_address: s.customerAddress || null,
+                    subtotal: s.subtotal,
+                    tax_rate: s.taxRate,
+                    tax_amount: s.taxAmount,
+                    discount_amount: s.discountAmount,
+                    total_amount: s.totalAmount,
+                    total_cost: s.totalCost,
+                    gross_profit: s.grossProfit,
+                    payment_method: s.paymentMethod,
+                    amount_tendered: s.amountTendered,
+                    change_given: s.changeGiven,
+                    is_credit_paid: s.isCreditPaid,
+                    credit_due_date: s.creditDueDate || null,
+                    paid_amount: s.paidAmount || 0,
+                    notes: encodeSaleNotesWithReturnMetadata(s),
+                    items: s.items || [],
+                  }))
+                )
+              )
+                .then(({ error: salesErr }) => {
+                  if (salesErr && (salesErr.code === '42501' || salesErr.message?.includes('row-level security'))) {
+                    hasRlsError = true;
+                  }
+                })
+                .catch((sErr) => console.warn('Supabase sales sync notice:', sErr))
+            );
+          }
 
-            // Push current local users to Supabase so both devices have identical staff list
-            const currentUsers = storageService.getUsers();
-            if (currentUsers.length > 0) {
-              // 1. Write to app_users if table is available
-              if (tableSyncSucceeded) {
-                try {
-                  await client.from('app_users').upsert(
+          if (paymentsNeedPush && currentPayments.length > 0) {
+            writeTasks.push(
+              Promise.resolve(
+                client.from('credit_payments').upsert(
+                  currentPayments.map((p) => ({
+                    id: p.id,
+                    customer_id: p.customerId,
+                    customer_name: p.customerName,
+                    sale_id: p.saleId || null,
+                    amount: p.amount,
+                    payment_method: p.paymentMethod,
+                    timestamp: p.timestamp,
+                    receipt_number: p.receiptNumber,
+                    notes: p.notes || null,
+                  }))
+                )
+              )
+                .then(({ error: payErr }) => {
+                  if (payErr && (payErr.code === '42501' || payErr.message?.includes('row-level security'))) {
+                    hasRlsError = true;
+                  }
+                })
+                .catch((pErr) => console.warn('Supabase credit payments sync notice:', pErr))
+            );
+          }
+
+          if (expensesNeedPush && currentExpenses.length > 0) {
+            writeTasks.push(
+              Promise.resolve(
+                client.from('expenses').upsert(
+                  currentExpenses.map((e) => ({
+                    id: e.id,
+                    date: e.date,
+                    category: e.category,
+                    title: e.title,
+                    amount: e.amount,
+                    payment_method: e.paymentMethod,
+                    payee: e.payee,
+                    receipt_number: e.receiptNumber || null,
+                    notes: e.notes || null,
+                  }))
+                )
+              )
+                .then(({ error: expErr }) => {
+                  if (expErr && (expErr.code === '42501' || expErr.message?.includes('row-level security'))) {
+                    hasRlsError = true;
+                  }
+                })
+                .catch((eErr) => console.warn('Supabase expenses sync notice:', eErr))
+            );
+          }
+
+          if (usersNeedPush && currentUsers.length > 0) {
+            if (tableSyncSucceeded) {
+              writeTasks.push(
+                Promise.resolve(
+                  client.from('app_users').upsert(
                     currentUsers.map((u) => ({
                       id: u.id,
                       email: u.email,
@@ -1227,13 +1316,15 @@ class CrossDeviceSyncService {
                       notes: u.notes || null,
                       updated_at: u.updatedAt || new Date().toISOString(),
                     }))
-                  );
-                } catch {}
-              }
-
-              // 2. Always maintain backup in system staff registry so devices without the new SQL table sync instantly
-              try {
-                await client.from('customers').upsert({
+                  )
+                )
+                  .then(() => {})
+                  .catch(() => {})
+              );
+            }
+            writeTasks.push(
+              Promise.resolve(
+                client.from('customers').upsert({
                   id: '__system_staff_registry__',
                   name: '__SYSTEM_STAFF_REGISTRY__',
                   phone: '+251 00 000 0000',
@@ -1241,13 +1332,15 @@ class CrossDeviceSyncService {
                   credit_limit: 0,
                   total_purchased: 0,
                   notes: JSON.stringify(currentUsers),
-                });
-              } catch (regSaveErr) {
-                console.warn('System staff registry save notice:', regSaveErr);
-              }
-            }
-          } catch (uErr) {
-            console.warn('Supabase users sync notice:', uErr);
+                })
+              )
+                .then(() => {})
+                .catch((regSaveErr) => console.warn('System staff registry save notice:', regSaveErr))
+            );
+          }
+
+          if (writeTasks.length > 0) {
+            await Promise.allSettled(writeTasks);
           }
 
           if (hasRlsError) {
